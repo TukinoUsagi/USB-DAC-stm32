@@ -1,0 +1,826 @@
+ARM GAS  /tmp/cco5cwFq.s 			page 1
+
+
+   1              		.cpu cortex-m3
+   2              		.arch armv7-m
+   3              		.fpu softvfp
+   4              		.eabi_attribute 20, 1
+   5              		.eabi_attribute 21, 1
+   6              		.eabi_attribute 23, 3
+   7              		.eabi_attribute 24, 1
+   8              		.eabi_attribute 25, 1
+   9              		.eabi_attribute 26, 1
+  10              		.eabi_attribute 30, 1
+  11              		.eabi_attribute 34, 1
+  12              		.eabi_attribute 18, 4
+  13              		.file	"usbd_desc.c"
+  14              		.text
+  15              	.Ltext0:
+  16              		.cfi_sections	.debug_frame
+  17              		.file 1 "usbd_desc.c"
+  18              		.section	.text.USBD_Class_DeviceDescriptor,"ax",%progbits
+  19              		.align	1
+  20              		.syntax unified
+  21              		.thumb
+  22              		.thumb_func
+  24              	USBD_Class_DeviceDescriptor:
+  25              	.LVL0:
+  26              	.LFB66:
+   1:usbd_desc.c   **** /**
+   2:usbd_desc.c   ****   ******************************************************************************
+   3:usbd_desc.c   ****   * @file    usbd_desc.c
+   4:usbd_desc.c   ****   * @brief   USB Deviceディスクリプタ (Blue Pill Stereo BTL Class-D USB DAC)
+   5:usbd_desc.c   ****   *
+   6:usbd_desc.c   ****   * 注意: VID=0x0483 はSTMicroelectronicsの正式VIDです。ST公式サンプルでも
+   7:usbd_desc.c   ****   *       自己開発ボードのデモに慣例的に使われますが、製品として販売�
+   8:usbd_desc.c   ****   *       場合はご自身のVID/PIDを取得してください(個人の実験・趣味用途な
+   9:usbd_desc.c   ****   *       このままで動作上は問題ありません)。
+  10:usbd_desc.c   ****   ******************************************************************************
+  11:usbd_desc.c   ****   */
+  12:usbd_desc.c   **** 
+  13:usbd_desc.c   **** #include "usbd_core.h"
+  14:usbd_desc.c   **** #include "usbd_desc.h"
+  15:usbd_desc.c   **** #include "usbd_conf.h"
+  16:usbd_desc.c   **** 
+  17:usbd_desc.c   **** #define USBD_VID                      0x0483U
+  18:usbd_desc.c   **** #define USBD_PID                      0x5A21U   /* 趣味用の適当なPID */
+  19:usbd_desc.c   **** #define USBD_LANGID_STRING            0x0409U   /* English (US) */
+  20:usbd_desc.c   **** #define USBD_MANUFACTURER_STRING      "Seiji DIY Audio"
+  21:usbd_desc.c   **** #define USBD_PRODUCT_FS_STRING        "BluePill Stereo BTL USB DAC"
+  22:usbd_desc.c   **** #define USBD_CONFIGURATION_FS_STRING  "Audio Config"
+  23:usbd_desc.c   **** #define USBD_INTERFACE_FS_STRING      "Audio Interface"
+  24:usbd_desc.c   **** 
+  25:usbd_desc.c   **** /* シリアル番号文字列ディスクリプタのバイト数
+  26:usbd_desc.c   ****  *   bLength(1) + bDescriptorType(1) + UTF-16LE文字列(12桁の16進数字 x 2byte)
+  27:usbd_desc.c   ****  *   = 2 + 24 = 26 = 0x1A
+  28:usbd_desc.c   ****  *   (Get_SerialNum()が8桁+4桁=12桁をUSBD_StringSerial[2]から書き込むため)
+  29:usbd_desc.c   ****  */
+  30:usbd_desc.c   **** #define USB_SIZ_STRING_SERIAL         0x1AU
+  31:usbd_desc.c   **** 
+  32:usbd_desc.c   **** static uint8_t *USBD_Class_DeviceDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
+ARM GAS  /tmp/cco5cwFq.s 			page 2
+
+
+  33:usbd_desc.c   **** static uint8_t *USBD_Class_LangIDStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
+  34:usbd_desc.c   **** static uint8_t *USBD_Class_ManufacturerStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
+  35:usbd_desc.c   **** static uint8_t *USBD_Class_ProductStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
+  36:usbd_desc.c   **** static uint8_t *USBD_Class_SerialStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
+  37:usbd_desc.c   **** static uint8_t *USBD_Class_ConfigStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
+  38:usbd_desc.c   **** static uint8_t *USBD_Class_InterfaceStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length);
+  39:usbd_desc.c   **** static void Get_SerialNum(void);
+  40:usbd_desc.c   **** static void IntToUnicode(uint32_t value, uint8_t *pbuf, uint8_t len);
+  41:usbd_desc.c   **** 
+  42:usbd_desc.c   **** USBD_DescriptorsTypeDef FS_Desc =
+  43:usbd_desc.c   **** {
+  44:usbd_desc.c   ****   USBD_Class_DeviceDescriptor,
+  45:usbd_desc.c   ****   USBD_Class_LangIDStrDescriptor,
+  46:usbd_desc.c   ****   USBD_Class_ManufacturerStrDescriptor,
+  47:usbd_desc.c   ****   USBD_Class_ProductStrDescriptor,
+  48:usbd_desc.c   ****   USBD_Class_SerialStrDescriptor,
+  49:usbd_desc.c   ****   USBD_Class_ConfigStrDescriptor,
+  50:usbd_desc.c   ****   USBD_Class_InterfaceStrDescriptor,
+  51:usbd_desc.c   **** };
+  52:usbd_desc.c   **** 
+  53:usbd_desc.c   **** __ALIGN_BEGIN uint8_t USBD_DeviceDesc[USB_LEN_DEV_DESC] __ALIGN_END =
+  54:usbd_desc.c   **** {
+  55:usbd_desc.c   ****   0x12,                       /* bLength */
+  56:usbd_desc.c   ****   USB_DESC_TYPE_DEVICE,       /* bDescriptorType */
+  57:usbd_desc.c   ****   0x00, 0x02,                 /* bcdUSB = 2.00 */
+  58:usbd_desc.c   ****   0x00,                       /* bDeviceClass (Audioはインターフェース単位で宣言) */
+  59:usbd_desc.c   ****   0x00,                       /* bDeviceSubClass */
+  60:usbd_desc.c   ****   0x00,                       /* bDeviceProtocol */
+  61:usbd_desc.c   ****   USB_MAX_EP0_SIZE,           /* bMaxPacketSize0 */
+  62:usbd_desc.c   ****   LOBYTE(USBD_VID), HIBYTE(USBD_VID),
+  63:usbd_desc.c   ****   LOBYTE(USBD_PID), HIBYTE(USBD_PID),
+  64:usbd_desc.c   ****   0x00, 0x02,                 /* bcdDevice = 2.00 */
+  65:usbd_desc.c   ****   USBD_IDX_MFC_STR,           /* Index of manufacturer string */
+  66:usbd_desc.c   ****   USBD_IDX_PRODUCT_STR,       /* Index of product string */
+  67:usbd_desc.c   ****   USBD_IDX_SERIAL_STR,        /* Index of serial number string */
+  68:usbd_desc.c   ****   USBD_MAX_NUM_CONFIGURATION  /* bNumConfigurations */
+  69:usbd_desc.c   **** };
+  70:usbd_desc.c   **** 
+  71:usbd_desc.c   **** __ALIGN_BEGIN uint8_t USBD_LangIDDesc[USB_LEN_LANGID_STR_DESC] __ALIGN_END =
+  72:usbd_desc.c   **** {
+  73:usbd_desc.c   ****   USB_LEN_LANGID_STR_DESC,
+  74:usbd_desc.c   ****   USB_DESC_TYPE_STRING,
+  75:usbd_desc.c   ****   LOBYTE(USBD_LANGID_STRING), HIBYTE(USBD_LANGID_STRING),
+  76:usbd_desc.c   **** };
+  77:usbd_desc.c   **** 
+  78:usbd_desc.c   **** __ALIGN_BEGIN uint8_t USBD_StringSerial[USB_SIZ_STRING_SERIAL] __ALIGN_END =
+  79:usbd_desc.c   **** {
+  80:usbd_desc.c   ****   USB_SIZ_STRING_SERIAL,
+  81:usbd_desc.c   ****   USB_DESC_TYPE_STRING,
+  82:usbd_desc.c   **** };
+  83:usbd_desc.c   **** 
+  84:usbd_desc.c   **** __ALIGN_BEGIN static uint8_t USBD_StrDesc[USBD_MAX_STR_DESC_SIZ] __ALIGN_END;
+  85:usbd_desc.c   **** 
+  86:usbd_desc.c   **** static uint8_t *USBD_Class_DeviceDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
+  87:usbd_desc.c   **** {
+  27              		.loc 1 87 1 view -0
+  28              		.cfi_startproc
+ARM GAS  /tmp/cco5cwFq.s 			page 3
+
+
+  29              		@ args = 0, pretend = 0, frame = 0
+  30              		@ frame_needed = 0, uses_anonymous_args = 0
+  31              		@ link register save eliminated.
+  88:usbd_desc.c   ****   UNUSED(speed);
+  32              		.loc 1 88 3 view .LVU1
+  89:usbd_desc.c   ****   *length = sizeof(USBD_DeviceDesc);
+  33              		.loc 1 89 3 view .LVU2
+  34              		.loc 1 89 11 is_stmt 0 view .LVU3
+  35 0000 1223     		movs	r3, #18
+  36 0002 0B80     		strh	r3, [r1]	@ movhi
+  90:usbd_desc.c   ****   return (uint8_t *)USBD_DeviceDesc;
+  37              		.loc 1 90 3 is_stmt 1 view .LVU4
+  91:usbd_desc.c   **** }
+  38              		.loc 1 91 1 is_stmt 0 view .LVU5
+  39 0004 0048     		ldr	r0, .L2
+  40              	.LVL1:
+  41              		.loc 1 91 1 view .LVU6
+  42 0006 7047     		bx	lr
+  43              	.L3:
+  44              		.align	2
+  45              	.L2:
+  46 0008 00000000 		.word	USBD_DeviceDesc
+  47              		.cfi_endproc
+  48              	.LFE66:
+  50              		.section	.text.USBD_Class_LangIDStrDescriptor,"ax",%progbits
+  51              		.align	1
+  52              		.syntax unified
+  53              		.thumb
+  54              		.thumb_func
+  56              	USBD_Class_LangIDStrDescriptor:
+  57              	.LVL2:
+  58              	.LFB67:
+  92:usbd_desc.c   **** 
+  93:usbd_desc.c   **** static uint8_t *USBD_Class_LangIDStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
+  94:usbd_desc.c   **** {
+  59              		.loc 1 94 1 is_stmt 1 view -0
+  60              		.cfi_startproc
+  61              		@ args = 0, pretend = 0, frame = 0
+  62              		@ frame_needed = 0, uses_anonymous_args = 0
+  63              		@ link register save eliminated.
+  95:usbd_desc.c   ****   UNUSED(speed);
+  64              		.loc 1 95 3 view .LVU8
+  96:usbd_desc.c   ****   *length = sizeof(USBD_LangIDDesc);
+  65              		.loc 1 96 3 view .LVU9
+  66              		.loc 1 96 11 is_stmt 0 view .LVU10
+  67 0000 0423     		movs	r3, #4
+  68 0002 0B80     		strh	r3, [r1]	@ movhi
+  97:usbd_desc.c   ****   return (uint8_t *)USBD_LangIDDesc;
+  69              		.loc 1 97 3 is_stmt 1 view .LVU11
+  98:usbd_desc.c   **** }
+  70              		.loc 1 98 1 is_stmt 0 view .LVU12
+  71 0004 0048     		ldr	r0, .L5
+  72              	.LVL3:
+  73              		.loc 1 98 1 view .LVU13
+  74 0006 7047     		bx	lr
+  75              	.L6:
+  76              		.align	2
+ARM GAS  /tmp/cco5cwFq.s 			page 4
+
+
+  77              	.L5:
+  78 0008 00000000 		.word	USBD_LangIDDesc
+  79              		.cfi_endproc
+  80              	.LFE67:
+  82              		.section	.text.IntToUnicode,"ax",%progbits
+  83              		.align	1
+  84              		.syntax unified
+  85              		.thumb
+  86              		.thumb_func
+  88              	IntToUnicode:
+  89              	.LVL4:
+  90              	.LFB74:
+  99:usbd_desc.c   **** 
+ 100:usbd_desc.c   **** static uint8_t *USBD_Class_ManufacturerStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
+ 101:usbd_desc.c   **** {
+ 102:usbd_desc.c   ****   UNUSED(speed);
+ 103:usbd_desc.c   ****   USBD_GetString((uint8_t *)USBD_MANUFACTURER_STRING, USBD_StrDesc, length);
+ 104:usbd_desc.c   ****   return USBD_StrDesc;
+ 105:usbd_desc.c   **** }
+ 106:usbd_desc.c   **** 
+ 107:usbd_desc.c   **** static uint8_t *USBD_Class_ProductStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
+ 108:usbd_desc.c   **** {
+ 109:usbd_desc.c   ****   UNUSED(speed);
+ 110:usbd_desc.c   ****   USBD_GetString((uint8_t *)USBD_PRODUCT_FS_STRING, USBD_StrDesc, length);
+ 111:usbd_desc.c   ****   return USBD_StrDesc;
+ 112:usbd_desc.c   **** }
+ 113:usbd_desc.c   **** 
+ 114:usbd_desc.c   **** static uint8_t *USBD_Class_SerialStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
+ 115:usbd_desc.c   **** {
+ 116:usbd_desc.c   ****   UNUSED(speed);
+ 117:usbd_desc.c   ****   *length = USB_SIZ_STRING_SERIAL;
+ 118:usbd_desc.c   ****   Get_SerialNum();
+ 119:usbd_desc.c   ****   return (uint8_t *)USBD_StringSerial;
+ 120:usbd_desc.c   **** }
+ 121:usbd_desc.c   **** 
+ 122:usbd_desc.c   **** static uint8_t *USBD_Class_ConfigStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
+ 123:usbd_desc.c   **** {
+ 124:usbd_desc.c   ****   UNUSED(speed);
+ 125:usbd_desc.c   ****   USBD_GetString((uint8_t *)USBD_CONFIGURATION_FS_STRING, USBD_StrDesc, length);
+ 126:usbd_desc.c   ****   return USBD_StrDesc;
+ 127:usbd_desc.c   **** }
+ 128:usbd_desc.c   **** 
+ 129:usbd_desc.c   **** static uint8_t *USBD_Class_InterfaceStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *length)
+ 130:usbd_desc.c   **** {
+ 131:usbd_desc.c   ****   UNUSED(speed);
+ 132:usbd_desc.c   ****   USBD_GetString((uint8_t *)USBD_INTERFACE_FS_STRING, USBD_StrDesc, length);
+ 133:usbd_desc.c   ****   return USBD_StrDesc;
+ 134:usbd_desc.c   **** }
+ 135:usbd_desc.c   **** 
+ 136:usbd_desc.c   **** /* STM32の96bitユニークID(UID_BASE)からシリアル番号文字列を生成 */
+ 137:usbd_desc.c   **** static void Get_SerialNum(void)
+ 138:usbd_desc.c   **** {
+ 139:usbd_desc.c   ****   uint32_t deviceserial0 = *(uint32_t *)(UID_BASE);
+ 140:usbd_desc.c   ****   uint32_t deviceserial1 = *(uint32_t *)(UID_BASE + 0x04U);
+ 141:usbd_desc.c   ****   uint32_t deviceserial2 = *(uint32_t *)(UID_BASE + 0x08U);
+ 142:usbd_desc.c   **** 
+ 143:usbd_desc.c   ****   deviceserial0 += deviceserial2;
+ARM GAS  /tmp/cco5cwFq.s 			page 5
+
+
+ 144:usbd_desc.c   **** 
+ 145:usbd_desc.c   ****   if (deviceserial0 != 0U)
+ 146:usbd_desc.c   ****   {
+ 147:usbd_desc.c   ****     IntToUnicode(deviceserial0, &USBD_StringSerial[2], 8U);
+ 148:usbd_desc.c   ****     IntToUnicode(deviceserial1, &USBD_StringSerial[18], 4U);
+ 149:usbd_desc.c   ****   }
+ 150:usbd_desc.c   **** }
+ 151:usbd_desc.c   **** 
+ 152:usbd_desc.c   **** static void IntToUnicode(uint32_t value, uint8_t *pbuf, uint8_t len)
+ 153:usbd_desc.c   **** {
+  91              		.loc 1 153 1 is_stmt 1 view -0
+  92              		.cfi_startproc
+  93              		@ args = 0, pretend = 0, frame = 0
+  94              		@ frame_needed = 0, uses_anonymous_args = 0
+ 154:usbd_desc.c   ****   for (uint8_t idx = 0U; idx < len; idx++)
+  95              		.loc 1 154 3 view .LVU15
+  96              	.LBB2:
+  97              		.loc 1 154 8 view .LVU16
+  98              		.loc 1 154 16 is_stmt 0 view .LVU17
+  99 0000 0023     		movs	r3, #0
+ 100              	.LVL5:
+ 101              		.loc 1 154 30 is_stmt 1 discriminator 1 view .LVU18
+ 102 0002 9342     		cmp	r3, r2
+ 103 0004 1CD2     		bcs	.L15
+ 104              	.LBE2:
+ 153:usbd_desc.c   ****   for (uint8_t idx = 0U; idx < len; idx++)
+ 105              		.loc 1 153 1 is_stmt 0 view .LVU19
+ 106 0006 00B5     		push	{lr}
+ 107              	.LCFI0:
+ 108              		.cfi_def_cfa_offset 4
+ 109              		.cfi_offset 14, -4
+ 110 0008 10E0     		b	.L11
+ 111              	.LVL6:
+ 112              	.L9:
+ 113              	.LBB5:
+ 114              	.LBB3:
+ 155:usbd_desc.c   ****   {
+ 156:usbd_desc.c   ****     uint8_t nibble = (uint8_t)((value >> 28) & 0x0FU);
+ 157:usbd_desc.c   ****     pbuf[2U * idx] = (nibble < 0x0AU) ? (nibble + '0') : (nibble - 10U + 'A');
+ 115              		.loc 1 157 20 discriminator 2 view .LVU20
+ 116 000a 0EF1370E 		add	lr, lr, #55
+ 117              	.LVL7:
+ 118              	.L10:
+ 119              		.loc 1 157 13 discriminator 4 view .LVU21
+ 120 000e 4FEA430C 		lsl	ip, r3, #1
+ 121              		.loc 1 157 20 discriminator 4 view .LVU22
+ 122 0012 01F813E0 		strb	lr, [r1, r3, lsl #1]
+ 158:usbd_desc.c   ****     value <<= 4;
+ 123              		.loc 1 158 5 is_stmt 1 view .LVU23
+ 124              		.loc 1 158 11 is_stmt 0 view .LVU24
+ 125 0016 0001     		lsls	r0, r0, #4
+ 126              	.LVL8:
+ 159:usbd_desc.c   ****     pbuf[2U * idx + 1U] = 0U;
+ 127              		.loc 1 159 5 is_stmt 1 view .LVU25
+ 128              		.loc 1 159 9 is_stmt 0 view .LVU26
+ 129 0018 0CF1010C 		add	ip, ip, #1
+ 130              		.loc 1 159 25 view .LVU27
+ARM GAS  /tmp/cco5cwFq.s 			page 6
+
+
+ 131 001c 4FF0000E 		mov	lr, #0
+ 132 0020 01F80CE0 		strb	lr, [r1, ip]
+ 133              	.LBE3:
+ 154:usbd_desc.c   ****   {
+ 134              		.loc 1 154 40 is_stmt 1 discriminator 2 view .LVU28
+ 135 0024 0133     		adds	r3, r3, #1
+ 136              	.LVL9:
+ 154:usbd_desc.c   ****   {
+ 137              		.loc 1 154 40 is_stmt 0 discriminator 2 view .LVU29
+ 138 0026 DBB2     		uxtb	r3, r3
+ 139              	.LVL10:
+ 154:usbd_desc.c   ****   {
+ 140              		.loc 1 154 30 is_stmt 1 discriminator 1 view .LVU30
+ 141 0028 9342     		cmp	r3, r2
+ 142 002a 07D2     		bcs	.L16
+ 143              	.LVL11:
+ 144              	.L11:
+ 145              	.LBB4:
+ 156:usbd_desc.c   ****     pbuf[2U * idx] = (nibble < 0x0AU) ? (nibble + '0') : (nibble - 10U + 'A');
+ 146              		.loc 1 156 5 view .LVU31
+ 156:usbd_desc.c   ****     pbuf[2U * idx] = (nibble < 0x0AU) ? (nibble + '0') : (nibble - 10U + 'A');
+ 147              		.loc 1 156 13 is_stmt 0 view .LVU32
+ 148 002c 4FEA107E 		lsr	lr, r0, #28
+ 149              	.LVL12:
+ 157:usbd_desc.c   ****     value <<= 4;
+ 150              		.loc 1 157 5 is_stmt 1 view .LVU33
+ 157:usbd_desc.c   ****     value <<= 4;
+ 151              		.loc 1 157 20 is_stmt 0 view .LVU34
+ 152 0030 B0F1204F 		cmp	r0, #-1610612736
+ 153 0034 E9D2     		bcs	.L9
+ 157:usbd_desc.c   ****     value <<= 4;
+ 154              		.loc 1 157 20 discriminator 1 view .LVU35
+ 155 0036 0EF1300E 		add	lr, lr, #48
+ 156              	.LVL13:
+ 157:usbd_desc.c   ****     value <<= 4;
+ 157              		.loc 1 157 20 discriminator 1 view .LVU36
+ 158 003a E8E7     		b	.L10
+ 159              	.LVL14:
+ 160              	.L16:
+ 157:usbd_desc.c   ****     value <<= 4;
+ 161              		.loc 1 157 20 discriminator 1 view .LVU37
+ 162              	.LBE4:
+ 163              	.LBE5:
+ 160:usbd_desc.c   ****   }
+ 161:usbd_desc.c   **** }
+ 164              		.loc 1 161 1 view .LVU38
+ 165 003c 5DF804FB 		ldr	pc, [sp], #4
+ 166              	.LVL15:
+ 167              	.L15:
+ 168              	.LCFI1:
+ 169              		.cfi_def_cfa_offset 0
+ 170              		.cfi_restore 14
+ 171              		.loc 1 161 1 view .LVU39
+ 172 0040 7047     		bx	lr
+ 173              		.cfi_endproc
+ 174              	.LFE74:
+ 176              		.section	.text.Get_SerialNum,"ax",%progbits
+ARM GAS  /tmp/cco5cwFq.s 			page 7
+
+
+ 177              		.align	1
+ 178              		.syntax unified
+ 179              		.thumb
+ 180              		.thumb_func
+ 182              	Get_SerialNum:
+ 183              	.LFB73:
+ 138:usbd_desc.c   ****   uint32_t deviceserial0 = *(uint32_t *)(UID_BASE);
+ 184              		.loc 1 138 1 is_stmt 1 view -0
+ 185              		.cfi_startproc
+ 186              		@ args = 0, pretend = 0, frame = 0
+ 187              		@ frame_needed = 0, uses_anonymous_args = 0
+ 188 0000 38B5     		push	{r3, r4, r5, lr}
+ 189              	.LCFI2:
+ 190              		.cfi_def_cfa_offset 16
+ 191              		.cfi_offset 3, -16
+ 192              		.cfi_offset 4, -12
+ 193              		.cfi_offset 5, -8
+ 194              		.cfi_offset 14, -4
+ 139:usbd_desc.c   ****   uint32_t deviceserial1 = *(uint32_t *)(UID_BASE + 0x04U);
+ 195              		.loc 1 139 3 view .LVU41
+ 139:usbd_desc.c   ****   uint32_t deviceserial1 = *(uint32_t *)(UID_BASE + 0x04U);
+ 196              		.loc 1 139 12 is_stmt 0 view .LVU42
+ 197 0002 0B4B     		ldr	r3, .L21
+ 198 0004 D3F8E807 		ldr	r0, [r3, #2024]
+ 199              	.LVL16:
+ 140:usbd_desc.c   ****   uint32_t deviceserial2 = *(uint32_t *)(UID_BASE + 0x08U);
+ 200              		.loc 1 140 3 is_stmt 1 view .LVU43
+ 140:usbd_desc.c   ****   uint32_t deviceserial2 = *(uint32_t *)(UID_BASE + 0x08U);
+ 201              		.loc 1 140 12 is_stmt 0 view .LVU44
+ 202 0008 D3F8EC47 		ldr	r4, [r3, #2028]
+ 203              	.LVL17:
+ 141:usbd_desc.c   **** 
+ 204              		.loc 1 141 3 is_stmt 1 view .LVU45
+ 141:usbd_desc.c   **** 
+ 205              		.loc 1 141 12 is_stmt 0 view .LVU46
+ 206 000c D3F8F037 		ldr	r3, [r3, #2032]
+ 207              	.LVL18:
+ 143:usbd_desc.c   **** 
+ 208              		.loc 1 143 3 is_stmt 1 view .LVU47
+ 145:usbd_desc.c   ****   {
+ 209              		.loc 1 145 3 view .LVU48
+ 145:usbd_desc.c   ****   {
+ 210              		.loc 1 145 6 is_stmt 0 view .LVU49
+ 211 0010 C018     		adds	r0, r0, r3
+ 212              	.LVL19:
+ 145:usbd_desc.c   ****   {
+ 213              		.loc 1 145 6 view .LVU50
+ 214 0012 00D1     		bne	.L20
+ 215              	.LVL20:
+ 216              	.L17:
+ 150:usbd_desc.c   **** 
+ 217              		.loc 1 150 1 view .LVU51
+ 218 0014 38BD     		pop	{r3, r4, r5, pc}
+ 219              	.LVL21:
+ 220              	.L20:
+ 147:usbd_desc.c   ****     IntToUnicode(deviceserial1, &USBD_StringSerial[18], 4U);
+ 221              		.loc 1 147 5 is_stmt 1 view .LVU52
+ARM GAS  /tmp/cco5cwFq.s 			page 8
+
+
+ 222 0016 074D     		ldr	r5, .L21+4
+ 223 0018 0822     		movs	r2, #8
+ 224 001a 2946     		mov	r1, r5
+ 225 001c FFF7FEFF 		bl	IntToUnicode
+ 226              	.LVL22:
+ 148:usbd_desc.c   ****   }
+ 227              		.loc 1 148 5 view .LVU53
+ 228 0020 0422     		movs	r2, #4
+ 229 0022 05F11001 		add	r1, r5, #16
+ 230 0026 2046     		mov	r0, r4
+ 231 0028 FFF7FEFF 		bl	IntToUnicode
+ 232              	.LVL23:
+ 150:usbd_desc.c   **** 
+ 233              		.loc 1 150 1 is_stmt 0 view .LVU54
+ 234 002c F2E7     		b	.L17
+ 235              	.L22:
+ 236 002e 00BF     		.align	2
+ 237              	.L21:
+ 238 0030 00F0FF1F 		.word	536866816
+ 239 0034 02000000 		.word	USBD_StringSerial+2
+ 240              		.cfi_endproc
+ 241              	.LFE73:
+ 243              		.section	.text.USBD_Class_SerialStrDescriptor,"ax",%progbits
+ 244              		.align	1
+ 245              		.syntax unified
+ 246              		.thumb
+ 247              		.thumb_func
+ 249              	USBD_Class_SerialStrDescriptor:
+ 250              	.LVL24:
+ 251              	.LFB70:
+ 115:usbd_desc.c   ****   UNUSED(speed);
+ 252              		.loc 1 115 1 is_stmt 1 view -0
+ 253              		.cfi_startproc
+ 254              		@ args = 0, pretend = 0, frame = 0
+ 255              		@ frame_needed = 0, uses_anonymous_args = 0
+ 115:usbd_desc.c   ****   UNUSED(speed);
+ 256              		.loc 1 115 1 is_stmt 0 view .LVU56
+ 257 0000 08B5     		push	{r3, lr}
+ 258              	.LCFI3:
+ 259              		.cfi_def_cfa_offset 8
+ 260              		.cfi_offset 3, -8
+ 261              		.cfi_offset 14, -4
+ 116:usbd_desc.c   ****   *length = USB_SIZ_STRING_SERIAL;
+ 262              		.loc 1 116 3 is_stmt 1 view .LVU57
+ 117:usbd_desc.c   ****   Get_SerialNum();
+ 263              		.loc 1 117 3 view .LVU58
+ 117:usbd_desc.c   ****   Get_SerialNum();
+ 264              		.loc 1 117 11 is_stmt 0 view .LVU59
+ 265 0002 1A23     		movs	r3, #26
+ 266 0004 0B80     		strh	r3, [r1]	@ movhi
+ 118:usbd_desc.c   ****   return (uint8_t *)USBD_StringSerial;
+ 267              		.loc 1 118 3 is_stmt 1 view .LVU60
+ 268 0006 FFF7FEFF 		bl	Get_SerialNum
+ 269              	.LVL25:
+ 119:usbd_desc.c   **** }
+ 270              		.loc 1 119 3 view .LVU61
+ 120:usbd_desc.c   **** 
+ARM GAS  /tmp/cco5cwFq.s 			page 9
+
+
+ 271              		.loc 1 120 1 is_stmt 0 view .LVU62
+ 272 000a 0148     		ldr	r0, .L25
+ 273 000c 08BD     		pop	{r3, pc}
+ 274              	.L26:
+ 275 000e 00BF     		.align	2
+ 276              	.L25:
+ 277 0010 00000000 		.word	USBD_StringSerial
+ 278              		.cfi_endproc
+ 279              	.LFE70:
+ 281              		.section	.rodata.USBD_Class_InterfaceStrDescriptor.str1.4,"aMS",%progbits,1
+ 282              		.align	2
+ 283              	.LC0:
+ 284 0000 41756469 		.ascii	"Audio Interface\000"
+ 284      6F20496E 
+ 284      74657266 
+ 284      61636500 
+ 285              		.section	.text.USBD_Class_InterfaceStrDescriptor,"ax",%progbits
+ 286              		.align	1
+ 287              		.syntax unified
+ 288              		.thumb
+ 289              		.thumb_func
+ 291              	USBD_Class_InterfaceStrDescriptor:
+ 292              	.LVL26:
+ 293              	.LFB72:
+ 130:usbd_desc.c   ****   UNUSED(speed);
+ 294              		.loc 1 130 1 is_stmt 1 view -0
+ 295              		.cfi_startproc
+ 296              		@ args = 0, pretend = 0, frame = 0
+ 297              		@ frame_needed = 0, uses_anonymous_args = 0
+ 130:usbd_desc.c   ****   UNUSED(speed);
+ 298              		.loc 1 130 1 is_stmt 0 view .LVU64
+ 299 0000 10B5     		push	{r4, lr}
+ 300              	.LCFI4:
+ 301              		.cfi_def_cfa_offset 8
+ 302              		.cfi_offset 4, -8
+ 303              		.cfi_offset 14, -4
+ 304 0002 0A46     		mov	r2, r1
+ 131:usbd_desc.c   ****   USBD_GetString((uint8_t *)USBD_INTERFACE_FS_STRING, USBD_StrDesc, length);
+ 305              		.loc 1 131 3 is_stmt 1 view .LVU65
+ 132:usbd_desc.c   ****   return USBD_StrDesc;
+ 306              		.loc 1 132 3 view .LVU66
+ 307 0004 034C     		ldr	r4, .L29
+ 308 0006 2146     		mov	r1, r4
+ 309              	.LVL27:
+ 132:usbd_desc.c   ****   return USBD_StrDesc;
+ 310              		.loc 1 132 3 is_stmt 0 view .LVU67
+ 311 0008 0348     		ldr	r0, .L29+4
+ 312              	.LVL28:
+ 132:usbd_desc.c   ****   return USBD_StrDesc;
+ 313              		.loc 1 132 3 view .LVU68
+ 314 000a FFF7FEFF 		bl	USBD_GetString
+ 315              	.LVL29:
+ 133:usbd_desc.c   **** }
+ 316              		.loc 1 133 3 is_stmt 1 view .LVU69
+ 134:usbd_desc.c   **** 
+ 317              		.loc 1 134 1 is_stmt 0 view .LVU70
+ 318 000e 2046     		mov	r0, r4
+ARM GAS  /tmp/cco5cwFq.s 			page 10
+
+
+ 319 0010 10BD     		pop	{r4, pc}
+ 320              	.L30:
+ 321 0012 00BF     		.align	2
+ 322              	.L29:
+ 323 0014 00000000 		.word	USBD_StrDesc
+ 324 0018 00000000 		.word	.LC0
+ 325              		.cfi_endproc
+ 326              	.LFE72:
+ 328              		.section	.rodata.USBD_Class_ConfigStrDescriptor.str1.4,"aMS",%progbits,1
+ 329              		.align	2
+ 330              	.LC1:
+ 331 0000 41756469 		.ascii	"Audio Config\000"
+ 331      6F20436F 
+ 331      6E666967 
+ 331      00
+ 332              		.section	.text.USBD_Class_ConfigStrDescriptor,"ax",%progbits
+ 333              		.align	1
+ 334              		.syntax unified
+ 335              		.thumb
+ 336              		.thumb_func
+ 338              	USBD_Class_ConfigStrDescriptor:
+ 339              	.LVL30:
+ 340              	.LFB71:
+ 123:usbd_desc.c   ****   UNUSED(speed);
+ 341              		.loc 1 123 1 is_stmt 1 view -0
+ 342              		.cfi_startproc
+ 343              		@ args = 0, pretend = 0, frame = 0
+ 344              		@ frame_needed = 0, uses_anonymous_args = 0
+ 123:usbd_desc.c   ****   UNUSED(speed);
+ 345              		.loc 1 123 1 is_stmt 0 view .LVU72
+ 346 0000 10B5     		push	{r4, lr}
+ 347              	.LCFI5:
+ 348              		.cfi_def_cfa_offset 8
+ 349              		.cfi_offset 4, -8
+ 350              		.cfi_offset 14, -4
+ 351 0002 0A46     		mov	r2, r1
+ 124:usbd_desc.c   ****   USBD_GetString((uint8_t *)USBD_CONFIGURATION_FS_STRING, USBD_StrDesc, length);
+ 352              		.loc 1 124 3 is_stmt 1 view .LVU73
+ 125:usbd_desc.c   ****   return USBD_StrDesc;
+ 353              		.loc 1 125 3 view .LVU74
+ 354 0004 034C     		ldr	r4, .L33
+ 355 0006 2146     		mov	r1, r4
+ 356              	.LVL31:
+ 125:usbd_desc.c   ****   return USBD_StrDesc;
+ 357              		.loc 1 125 3 is_stmt 0 view .LVU75
+ 358 0008 0348     		ldr	r0, .L33+4
+ 359              	.LVL32:
+ 125:usbd_desc.c   ****   return USBD_StrDesc;
+ 360              		.loc 1 125 3 view .LVU76
+ 361 000a FFF7FEFF 		bl	USBD_GetString
+ 362              	.LVL33:
+ 126:usbd_desc.c   **** }
+ 363              		.loc 1 126 3 is_stmt 1 view .LVU77
+ 127:usbd_desc.c   **** 
+ 364              		.loc 1 127 1 is_stmt 0 view .LVU78
+ 365 000e 2046     		mov	r0, r4
+ 366 0010 10BD     		pop	{r4, pc}
+ARM GAS  /tmp/cco5cwFq.s 			page 11
+
+
+ 367              	.L34:
+ 368 0012 00BF     		.align	2
+ 369              	.L33:
+ 370 0014 00000000 		.word	USBD_StrDesc
+ 371 0018 00000000 		.word	.LC1
+ 372              		.cfi_endproc
+ 373              	.LFE71:
+ 375              		.section	.rodata.USBD_Class_ProductStrDescriptor.str1.4,"aMS",%progbits,1
+ 376              		.align	2
+ 377              	.LC2:
+ 378 0000 426C7565 		.ascii	"BluePill Stereo BTL USB DAC\000"
+ 378      50696C6C 
+ 378      20537465 
+ 378      72656F20 
+ 378      42544C20 
+ 379              		.section	.text.USBD_Class_ProductStrDescriptor,"ax",%progbits
+ 380              		.align	1
+ 381              		.syntax unified
+ 382              		.thumb
+ 383              		.thumb_func
+ 385              	USBD_Class_ProductStrDescriptor:
+ 386              	.LVL34:
+ 387              	.LFB69:
+ 108:usbd_desc.c   ****   UNUSED(speed);
+ 388              		.loc 1 108 1 is_stmt 1 view -0
+ 389              		.cfi_startproc
+ 390              		@ args = 0, pretend = 0, frame = 0
+ 391              		@ frame_needed = 0, uses_anonymous_args = 0
+ 108:usbd_desc.c   ****   UNUSED(speed);
+ 392              		.loc 1 108 1 is_stmt 0 view .LVU80
+ 393 0000 10B5     		push	{r4, lr}
+ 394              	.LCFI6:
+ 395              		.cfi_def_cfa_offset 8
+ 396              		.cfi_offset 4, -8
+ 397              		.cfi_offset 14, -4
+ 398 0002 0A46     		mov	r2, r1
+ 109:usbd_desc.c   ****   USBD_GetString((uint8_t *)USBD_PRODUCT_FS_STRING, USBD_StrDesc, length);
+ 399              		.loc 1 109 3 is_stmt 1 view .LVU81
+ 110:usbd_desc.c   ****   return USBD_StrDesc;
+ 400              		.loc 1 110 3 view .LVU82
+ 401 0004 034C     		ldr	r4, .L37
+ 402 0006 2146     		mov	r1, r4
+ 403              	.LVL35:
+ 110:usbd_desc.c   ****   return USBD_StrDesc;
+ 404              		.loc 1 110 3 is_stmt 0 view .LVU83
+ 405 0008 0348     		ldr	r0, .L37+4
+ 406              	.LVL36:
+ 110:usbd_desc.c   ****   return USBD_StrDesc;
+ 407              		.loc 1 110 3 view .LVU84
+ 408 000a FFF7FEFF 		bl	USBD_GetString
+ 409              	.LVL37:
+ 111:usbd_desc.c   **** }
+ 410              		.loc 1 111 3 is_stmt 1 view .LVU85
+ 112:usbd_desc.c   **** 
+ 411              		.loc 1 112 1 is_stmt 0 view .LVU86
+ 412 000e 2046     		mov	r0, r4
+ 413 0010 10BD     		pop	{r4, pc}
+ARM GAS  /tmp/cco5cwFq.s 			page 12
+
+
+ 414              	.L38:
+ 415 0012 00BF     		.align	2
+ 416              	.L37:
+ 417 0014 00000000 		.word	USBD_StrDesc
+ 418 0018 00000000 		.word	.LC2
+ 419              		.cfi_endproc
+ 420              	.LFE69:
+ 422              		.section	.rodata.USBD_Class_ManufacturerStrDescriptor.str1.4,"aMS",%progbits,1
+ 423              		.align	2
+ 424              	.LC3:
+ 425 0000 5365696A 		.ascii	"Seiji DIY Audio\000"
+ 425      69204449 
+ 425      59204175 
+ 425      64696F00 
+ 426              		.section	.text.USBD_Class_ManufacturerStrDescriptor,"ax",%progbits
+ 427              		.align	1
+ 428              		.syntax unified
+ 429              		.thumb
+ 430              		.thumb_func
+ 432              	USBD_Class_ManufacturerStrDescriptor:
+ 433              	.LVL38:
+ 434              	.LFB68:
+ 101:usbd_desc.c   ****   UNUSED(speed);
+ 435              		.loc 1 101 1 is_stmt 1 view -0
+ 436              		.cfi_startproc
+ 437              		@ args = 0, pretend = 0, frame = 0
+ 438              		@ frame_needed = 0, uses_anonymous_args = 0
+ 101:usbd_desc.c   ****   UNUSED(speed);
+ 439              		.loc 1 101 1 is_stmt 0 view .LVU88
+ 440 0000 10B5     		push	{r4, lr}
+ 441              	.LCFI7:
+ 442              		.cfi_def_cfa_offset 8
+ 443              		.cfi_offset 4, -8
+ 444              		.cfi_offset 14, -4
+ 445 0002 0A46     		mov	r2, r1
+ 102:usbd_desc.c   ****   USBD_GetString((uint8_t *)USBD_MANUFACTURER_STRING, USBD_StrDesc, length);
+ 446              		.loc 1 102 3 is_stmt 1 view .LVU89
+ 103:usbd_desc.c   ****   return USBD_StrDesc;
+ 447              		.loc 1 103 3 view .LVU90
+ 448 0004 034C     		ldr	r4, .L41
+ 449 0006 2146     		mov	r1, r4
+ 450              	.LVL39:
+ 103:usbd_desc.c   ****   return USBD_StrDesc;
+ 451              		.loc 1 103 3 is_stmt 0 view .LVU91
+ 452 0008 0348     		ldr	r0, .L41+4
+ 453              	.LVL40:
+ 103:usbd_desc.c   ****   return USBD_StrDesc;
+ 454              		.loc 1 103 3 view .LVU92
+ 455 000a FFF7FEFF 		bl	USBD_GetString
+ 456              	.LVL41:
+ 104:usbd_desc.c   **** }
+ 457              		.loc 1 104 3 is_stmt 1 view .LVU93
+ 105:usbd_desc.c   **** 
+ 458              		.loc 1 105 1 is_stmt 0 view .LVU94
+ 459 000e 2046     		mov	r0, r4
+ 460 0010 10BD     		pop	{r4, pc}
+ 461              	.L42:
+ARM GAS  /tmp/cco5cwFq.s 			page 13
+
+
+ 462 0012 00BF     		.align	2
+ 463              	.L41:
+ 464 0014 00000000 		.word	USBD_StrDesc
+ 465 0018 00000000 		.word	.LC3
+ 466              		.cfi_endproc
+ 467              	.LFE68:
+ 469              		.section	.bss.USBD_StrDesc,"aw",%nobits
+ 470              		.align	2
+ 473              	USBD_StrDesc:
+ 474 0000 00000000 		.space	256
+ 474      00000000 
+ 474      00000000 
+ 474      00000000 
+ 474      00000000 
+ 475              		.global	USBD_StringSerial
+ 476              		.section	.data.USBD_StringSerial,"aw"
+ 477              		.align	2
+ 480              	USBD_StringSerial:
+ 481 0000 1A0300   		.ascii	"\032\003\000"
+ 482 0003 00000000 		.space	23
+ 482      00000000 
+ 482      00000000 
+ 482      00000000 
+ 482      00000000 
+ 483              		.global	USBD_LangIDDesc
+ 484              		.section	.data.USBD_LangIDDesc,"aw"
+ 485              		.align	2
+ 488              	USBD_LangIDDesc:
+ 489 0000 04030904 		.ascii	"\004\003\011\004"
+ 490              		.global	USBD_DeviceDesc
+ 491              		.section	.data.USBD_DeviceDesc,"aw"
+ 492              		.align	2
+ 495              	USBD_DeviceDesc:
+ 496 0000 12010002 		.ascii	"\022\001\000\002\000\000\000@\203\004!Z\000\002\001"
+ 496      00000040 
+ 496      8304215A 
+ 496      000201
+ 497 000f 020301   		.ascii	"\002\003\001"
+ 498              		.global	FS_Desc
+ 499              		.section	.data.FS_Desc,"aw"
+ 500              		.align	2
+ 503              	FS_Desc:
+ 504 0000 00000000 		.word	USBD_Class_DeviceDescriptor
+ 505 0004 00000000 		.word	USBD_Class_LangIDStrDescriptor
+ 506 0008 00000000 		.word	USBD_Class_ManufacturerStrDescriptor
+ 507 000c 00000000 		.word	USBD_Class_ProductStrDescriptor
+ 508 0010 00000000 		.word	USBD_Class_SerialStrDescriptor
+ 509 0014 00000000 		.word	USBD_Class_ConfigStrDescriptor
+ 510 0018 00000000 		.word	USBD_Class_InterfaceStrDescriptor
+ 511              		.text
+ 512              	.Letext0:
+ 513              		.file 2 "/usr/lib/gcc/arm-none-eabi/13.2.1/include/stdint.h"
+ 514              		.file 3 "Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h"
+ 515              		.file 4 "USB_DEVICE/App/usbd_desc.h"
+ 516              		.file 5 "Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ctlreq.h"
+ARM GAS  /tmp/cco5cwFq.s 			page 14
+
+
+DEFINED SYMBOLS
+                            *ABS*:00000000 usbd_desc.c
+     /tmp/cco5cwFq.s:19     .text.USBD_Class_DeviceDescriptor:00000000 $t
+     /tmp/cco5cwFq.s:24     .text.USBD_Class_DeviceDescriptor:00000000 USBD_Class_DeviceDescriptor
+     /tmp/cco5cwFq.s:46     .text.USBD_Class_DeviceDescriptor:00000008 $d
+     /tmp/cco5cwFq.s:495    .data.USBD_DeviceDesc:00000000 USBD_DeviceDesc
+     /tmp/cco5cwFq.s:51     .text.USBD_Class_LangIDStrDescriptor:00000000 $t
+     /tmp/cco5cwFq.s:56     .text.USBD_Class_LangIDStrDescriptor:00000000 USBD_Class_LangIDStrDescriptor
+     /tmp/cco5cwFq.s:78     .text.USBD_Class_LangIDStrDescriptor:00000008 $d
+     /tmp/cco5cwFq.s:488    .data.USBD_LangIDDesc:00000000 USBD_LangIDDesc
+     /tmp/cco5cwFq.s:83     .text.IntToUnicode:00000000 $t
+     /tmp/cco5cwFq.s:88     .text.IntToUnicode:00000000 IntToUnicode
+     /tmp/cco5cwFq.s:177    .text.Get_SerialNum:00000000 $t
+     /tmp/cco5cwFq.s:182    .text.Get_SerialNum:00000000 Get_SerialNum
+     /tmp/cco5cwFq.s:238    .text.Get_SerialNum:00000030 $d
+     /tmp/cco5cwFq.s:480    .data.USBD_StringSerial:00000000 USBD_StringSerial
+     /tmp/cco5cwFq.s:244    .text.USBD_Class_SerialStrDescriptor:00000000 $t
+     /tmp/cco5cwFq.s:249    .text.USBD_Class_SerialStrDescriptor:00000000 USBD_Class_SerialStrDescriptor
+     /tmp/cco5cwFq.s:277    .text.USBD_Class_SerialStrDescriptor:00000010 $d
+     /tmp/cco5cwFq.s:282    .rodata.USBD_Class_InterfaceStrDescriptor.str1.4:00000000 $d
+     /tmp/cco5cwFq.s:286    .text.USBD_Class_InterfaceStrDescriptor:00000000 $t
+     /tmp/cco5cwFq.s:291    .text.USBD_Class_InterfaceStrDescriptor:00000000 USBD_Class_InterfaceStrDescriptor
+     /tmp/cco5cwFq.s:323    .text.USBD_Class_InterfaceStrDescriptor:00000014 $d
+     /tmp/cco5cwFq.s:473    .bss.USBD_StrDesc:00000000 USBD_StrDesc
+     /tmp/cco5cwFq.s:329    .rodata.USBD_Class_ConfigStrDescriptor.str1.4:00000000 $d
+     /tmp/cco5cwFq.s:333    .text.USBD_Class_ConfigStrDescriptor:00000000 $t
+     /tmp/cco5cwFq.s:338    .text.USBD_Class_ConfigStrDescriptor:00000000 USBD_Class_ConfigStrDescriptor
+     /tmp/cco5cwFq.s:370    .text.USBD_Class_ConfigStrDescriptor:00000014 $d
+     /tmp/cco5cwFq.s:376    .rodata.USBD_Class_ProductStrDescriptor.str1.4:00000000 $d
+     /tmp/cco5cwFq.s:380    .text.USBD_Class_ProductStrDescriptor:00000000 $t
+     /tmp/cco5cwFq.s:385    .text.USBD_Class_ProductStrDescriptor:00000000 USBD_Class_ProductStrDescriptor
+     /tmp/cco5cwFq.s:417    .text.USBD_Class_ProductStrDescriptor:00000014 $d
+     /tmp/cco5cwFq.s:423    .rodata.USBD_Class_ManufacturerStrDescriptor.str1.4:00000000 $d
+     /tmp/cco5cwFq.s:427    .text.USBD_Class_ManufacturerStrDescriptor:00000000 $t
+     /tmp/cco5cwFq.s:432    .text.USBD_Class_ManufacturerStrDescriptor:00000000 USBD_Class_ManufacturerStrDescriptor
+     /tmp/cco5cwFq.s:464    .text.USBD_Class_ManufacturerStrDescriptor:00000014 $d
+     /tmp/cco5cwFq.s:470    .bss.USBD_StrDesc:00000000 $d
+     /tmp/cco5cwFq.s:477    .data.USBD_StringSerial:00000000 $d
+     /tmp/cco5cwFq.s:485    .data.USBD_LangIDDesc:00000000 $d
+     /tmp/cco5cwFq.s:492    .data.USBD_DeviceDesc:00000000 $d
+     /tmp/cco5cwFq.s:503    .data.FS_Desc:00000000 FS_Desc
+     /tmp/cco5cwFq.s:500    .data.FS_Desc:00000000 $d
+
+UNDEFINED SYMBOLS
+USBD_GetString

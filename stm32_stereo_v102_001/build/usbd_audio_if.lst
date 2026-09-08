@@ -1,0 +1,1126 @@
+ARM GAS  /tmp/ccI6ORsy.s 			page 1
+
+
+   1              		.cpu cortex-m3
+   2              		.arch armv7-m
+   3              		.fpu softvfp
+   4              		.eabi_attribute 20, 1
+   5              		.eabi_attribute 21, 1
+   6              		.eabi_attribute 23, 3
+   7              		.eabi_attribute 24, 1
+   8              		.eabi_attribute 25, 1
+   9              		.eabi_attribute 26, 1
+  10              		.eabi_attribute 30, 1
+  11              		.eabi_attribute 34, 1
+  12              		.eabi_attribute 18, 4
+  13              		.file	"usbd_audio_if.c"
+  14              		.text
+  15              	.Ltext0:
+  16              		.cfi_sections	.debug_frame
+  17              		.file 1 "USB_DEVICE/App/usbd_audio_if.c"
+  18              		.section	.text.AUDIO_OutputSilence,"ax",%progbits
+  19              		.align	1
+  20              		.syntax unified
+  21              		.thumb
+  22              		.thumb_func
+  24              	AUDIO_OutputSilence:
+  25              	.LFB66:
+   1:USB_DEVICE/App/usbd_audio_if.c **** /**
+   2:USB_DEVICE/App/usbd_audio_if.c ****   ******************************************************************************
+   3:USB_DEVICE/App/usbd_audio_if.c ****   * @file    usbd_audio_if.c
+   4:USB_DEVICE/App/usbd_audio_if.c ****   * @brief   USB Audio再生エンジン本体
+   5:USB_DEVICE/App/usbd_audio_if.c ****   *
+   6:USB_DEVICE/App/usbd_audio_if.c ****   * ----------------------------------------------------------------------------
+   7:USB_DEVICE/App/usbd_audio_if.c ****   * 動作の流れ
+   8:USB_DEVICE/App/usbd_audio_if.c ****   * ----------------------------------------------------------------------------
+   9:USB_DEVICE/App/usbd_audio_if.c ****   *   PC (USB Audio Class 1.0, 16bit stereo, USBD_AUDIO_FREQ Hz)
+  10:USB_DEVICE/App/usbd_audio_if.c ****   *       ↓ (毎USBフレーム=1msごとにISOアウト転送)
+  11:USB_DEVICE/App/usbd_audio_if.c ****   *   usbd_audio.c (ST公式ミドルウェア)
+  12:USB_DEVICE/App/usbd_audio_if.c ****   *       ↓ haudio->buffer[] というリングバッファに書き込み
+  13:USB_DEVICE/App/usbd_audio_if.c ****   *   AUDIO_IF_AudioCmd(AUDIO_CMD_START) で
+  14:USB_DEVICE/App/usbd_audio_if.c ****   *       g_audio_ring = &haudio->buffer[0] を受け取り保持
+  15:USB_DEVICE/App/usbd_audio_if.c ****   *       ↓
+  16:USB_DEVICE/App/usbd_audio_if.c ****   *   TIM4 割り込み (USBD_AUDIO_FREQ Hzごとに発火)
+  17:USB_DEVICE/App/usbd_audio_if.c ****   *       g_audio_ring[g_play_ptr] から1サンプル(L16+R16=4byte)取り出し
+  18:USB_DEVICE/App/usbd_audio_if.c ****   *       ↓ 0..65535 にオフセットしてPWM CCR範囲にスケーリング
+  19:USB_DEVICE/App/usbd_audio_if.c ****   *   TIM1 CCR1(LEFT) / CCR2(RIGHT) 書き込み
+  20:USB_DEVICE/App/usbd_audio_if.c ****   *       ↓
+  21:USB_DEVICE/App/usbd_audio_if.c ****   *   TIM1 120kHz相補PWM出力 (PA8/PB13, PA9/PB14)
+  22:USB_DEVICE/App/usbd_audio_if.c ****   *
+  23:USB_DEVICE/App/usbd_audio_if.c ****   * リングバッファの読み出し位置(g_play_ptr)は書き込み側(wr_ptr)と
+  24:USB_DEVICE/App/usbd_audio_if.c ****   * 完全に独立したフリーランタイマーで進む。半周・1周進むごとに
+  25:USB_DEVICE/App/usbd_audio_if.c ****   * USBD_AUDIO_Sync() を呼び、ホストとの速度差(クロックドリフト)を
+  26:USB_DEVICE/App/usbd_audio_if.c ****   * ライブラリ内蔵の±4byte補正ロジックに反映させる。
+  27:USB_DEVICE/App/usbd_audio_if.c ****   * ----------------------------------------------------------------------------
+  28:USB_DEVICE/App/usbd_audio_if.c ****   */
+  29:USB_DEVICE/App/usbd_audio_if.c **** 
+  30:USB_DEVICE/App/usbd_audio_if.c **** #include "usbd_audio_if.h"
+  31:USB_DEVICE/App/usbd_audio_if.c **** #include "main.h"
+  32:USB_DEVICE/App/usbd_audio_if.c **** 
+  33:USB_DEVICE/App/usbd_audio_if.c **** 
+ARM GAS  /tmp/ccI6ORsy.s 			page 2
+
+
+  34:USB_DEVICE/App/usbd_audio_if.c **** /* ----------------------------------------------------------------------------
+  35:USB_DEVICE/App/usbd_audio_if.c ****  * PWM CCR 可動範囲 (main.ino側のTIM1設定と合わせること)
+  36:USB_DEVICE/App/usbd_audio_if.c ****  *   TIM1 Period=599, DeadTime=7 前提でのマージン込み範囲
+  37:USB_DEVICE/App/usbd_audio_if.c ****  * ----------------------------------------------------------------------------*/
+  38:USB_DEVICE/App/usbd_audio_if.c **** #define PWM_CCR_MIN   30U
+  39:USB_DEVICE/App/usbd_audio_if.c **** #define PWM_CCR_MAX   570U
+  40:USB_DEVICE/App/usbd_audio_if.c **** 
+  41:USB_DEVICE/App/usbd_audio_if.c **** extern TIM_HandleTypeDef htim1;   /* main.ino側で定義されたTIM1(PWM)ハンドル */
+  42:USB_DEVICE/App/usbd_audio_if.c **** TIM_HandleTypeDef htim4;          /* このファイルで定義するオーディオサンプル�
+  43:USB_DEVICE/App/usbd_audio_if.c **** 
+  44:USB_DEVICE/App/usbd_audio_if.c **** volatile uint8_t g_usb_audio_playing = 0U;
+  45:USB_DEVICE/App/usbd_audio_if.c **** 
+  46:USB_DEVICE/App/usbd_audio_if.c **** static volatile uint8_t  *g_audio_ring      = NULL;
+  47:USB_DEVICE/App/usbd_audio_if.c **** static volatile uint32_t  g_play_ptr        = 0U;
+  48:USB_DEVICE/App/usbd_audio_if.c **** static volatile uint32_t  g_bytes_since_sync = 0U;
+  49:USB_DEVICE/App/usbd_audio_if.c **** static volatile uint8_t   g_sync_half_toggle = 0U;
+  50:USB_DEVICE/App/usbd_audio_if.c **** 
+  51:USB_DEVICE/App/usbd_audio_if.c **** static int8_t  AUDIO_IF_Init(uint32_t AudioFreq, uint32_t Volume, uint32_t options);
+  52:USB_DEVICE/App/usbd_audio_if.c **** static int8_t  AUDIO_IF_DeInit(uint32_t options);
+  53:USB_DEVICE/App/usbd_audio_if.c **** static int8_t  AUDIO_IF_AudioCmd(uint8_t *pbuf, uint32_t size, uint8_t cmd);
+  54:USB_DEVICE/App/usbd_audio_if.c **** static int8_t  AUDIO_IF_VolumeCtl(uint8_t vol);
+  55:USB_DEVICE/App/usbd_audio_if.c **** static int8_t  AUDIO_IF_MuteCtl(uint8_t cmd);
+  56:USB_DEVICE/App/usbd_audio_if.c **** static int8_t  AUDIO_IF_PeriodicTC(uint8_t *pbuf, uint32_t size, uint8_t cmd);
+  57:USB_DEVICE/App/usbd_audio_if.c **** static int8_t  AUDIO_IF_GetState(void);
+  58:USB_DEVICE/App/usbd_audio_if.c **** 
+  59:USB_DEVICE/App/usbd_audio_if.c **** USBD_AUDIO_ItfTypeDef USBD_AUDIO_fops =
+  60:USB_DEVICE/App/usbd_audio_if.c **** {
+  61:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_IF_Init,
+  62:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_IF_DeInit,
+  63:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_IF_AudioCmd,
+  64:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_IF_VolumeCtl,
+  65:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_IF_MuteCtl,
+  66:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_IF_PeriodicTC,
+  67:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_IF_GetState,
+  68:USB_DEVICE/App/usbd_audio_if.c **** };
+  69:USB_DEVICE/App/usbd_audio_if.c **** 
+  70:USB_DEVICE/App/usbd_audio_if.c **** /**
+  71:USB_DEVICE/App/usbd_audio_if.c ****   * @brief  無音(PWM中央値)をCCRに書き込む
+  72:USB_DEVICE/App/usbd_audio_if.c ****   */
+  73:USB_DEVICE/App/usbd_audio_if.c **** static void AUDIO_OutputSilence(void)
+  74:USB_DEVICE/App/usbd_audio_if.c **** {
+  26              		.loc 1 74 1 view -0
+  27              		.cfi_startproc
+  28              		@ args = 0, pretend = 0, frame = 0
+  29              		@ frame_needed = 0, uses_anonymous_args = 0
+  30              		@ link register save eliminated.
+  75:USB_DEVICE/App/usbd_audio_if.c ****   uint32_t mid = (PWM_CCR_MIN + PWM_CCR_MAX) / 2U;
+  31              		.loc 1 75 3 view .LVU1
+  32              	.LVL0:
+  76:USB_DEVICE/App/usbd_audio_if.c ****   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, mid);
+  33              		.loc 1 76 3 view .LVU2
+  34 0000 034B     		ldr	r3, .L2
+  35 0002 1B68     		ldr	r3, [r3]
+  36 0004 4FF49672 		mov	r2, #300
+  37 0008 5A63     		str	r2, [r3, #52]
+  77:USB_DEVICE/App/usbd_audio_if.c ****   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, mid);
+  38              		.loc 1 77 3 view .LVU3
+ARM GAS  /tmp/ccI6ORsy.s 			page 3
+
+
+  39 000a 9A63     		str	r2, [r3, #56]
+  78:USB_DEVICE/App/usbd_audio_if.c **** }
+  40              		.loc 1 78 1 is_stmt 0 view .LVU4
+  41 000c 7047     		bx	lr
+  42              	.L3:
+  43 000e 00BF     		.align	2
+  44              	.L2:
+  45 0010 00000000 		.word	htim1
+  46              		.cfi_endproc
+  47              	.LFE66:
+  49              		.section	.text.AUDIO_IF_Init,"ax",%progbits
+  50              		.align	1
+  51              		.syntax unified
+  52              		.thumb
+  53              		.thumb_func
+  55              	AUDIO_IF_Init:
+  56              	.LVL1:
+  57              	.LFB67:
+  79:USB_DEVICE/App/usbd_audio_if.c **** 
+  80:USB_DEVICE/App/usbd_audio_if.c **** static int8_t AUDIO_IF_Init(uint32_t AudioFreq, uint32_t Volume, uint32_t options)
+  81:USB_DEVICE/App/usbd_audio_if.c **** {
+  58              		.loc 1 81 1 is_stmt 1 view -0
+  59              		.cfi_startproc
+  60              		@ args = 0, pretend = 0, frame = 0
+  61              		@ frame_needed = 0, uses_anonymous_args = 0
+  62              		.loc 1 81 1 is_stmt 0 view .LVU6
+  63 0000 08B5     		push	{r3, lr}
+  64              	.LCFI0:
+  65              		.cfi_def_cfa_offset 8
+  66              		.cfi_offset 3, -8
+  67              		.cfi_offset 14, -4
+  82:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(AudioFreq);
+  68              		.loc 1 82 3 is_stmt 1 view .LVU7
+  83:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(Volume);
+  69              		.loc 1 83 3 view .LVU8
+  84:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(options);
+  70              		.loc 1 84 3 view .LVU9
+  85:USB_DEVICE/App/usbd_audio_if.c **** 
+  86:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_OutputSilence();
+  71              		.loc 1 86 3 view .LVU10
+  72 0002 FFF7FEFF 		bl	AUDIO_OutputSilence
+  73              	.LVL2:
+  87:USB_DEVICE/App/usbd_audio_if.c ****   return 0;
+  74              		.loc 1 87 3 view .LVU11
+  88:USB_DEVICE/App/usbd_audio_if.c **** }
+  75              		.loc 1 88 1 is_stmt 0 view .LVU12
+  76 0006 0020     		movs	r0, #0
+  77 0008 08BD     		pop	{r3, pc}
+  78              		.cfi_endproc
+  79              	.LFE67:
+  81              		.section	.text.AUDIO_IF_DeInit,"ax",%progbits
+  82              		.align	1
+  83              		.syntax unified
+  84              		.thumb
+  85              		.thumb_func
+  87              	AUDIO_IF_DeInit:
+  88              	.LVL3:
+ARM GAS  /tmp/ccI6ORsy.s 			page 4
+
+
+  89              	.LFB68:
+  89:USB_DEVICE/App/usbd_audio_if.c **** 
+  90:USB_DEVICE/App/usbd_audio_if.c **** static int8_t AUDIO_IF_DeInit(uint32_t options)
+  91:USB_DEVICE/App/usbd_audio_if.c **** {
+  90              		.loc 1 91 1 is_stmt 1 view -0
+  91              		.cfi_startproc
+  92              		@ args = 0, pretend = 0, frame = 0
+  93              		@ frame_needed = 0, uses_anonymous_args = 0
+  94              		.loc 1 91 1 is_stmt 0 view .LVU14
+  95 0000 10B5     		push	{r4, lr}
+  96              	.LCFI1:
+  97              		.cfi_def_cfa_offset 8
+  98              		.cfi_offset 4, -8
+  99              		.cfi_offset 14, -4
+  92:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(options);
+ 100              		.loc 1 92 3 is_stmt 1 view .LVU15
+  93:USB_DEVICE/App/usbd_audio_if.c ****   g_usb_audio_playing = 0U;
+ 101              		.loc 1 93 3 view .LVU16
+ 102              		.loc 1 93 23 is_stmt 0 view .LVU17
+ 103 0002 0024     		movs	r4, #0
+ 104 0004 024B     		ldr	r3, .L8
+ 105 0006 1C70     		strb	r4, [r3]
+  94:USB_DEVICE/App/usbd_audio_if.c ****   AUDIO_OutputSilence();
+ 106              		.loc 1 94 3 is_stmt 1 view .LVU18
+ 107 0008 FFF7FEFF 		bl	AUDIO_OutputSilence
+ 108              	.LVL4:
+  95:USB_DEVICE/App/usbd_audio_if.c ****   return 0;
+ 109              		.loc 1 95 3 view .LVU19
+  96:USB_DEVICE/App/usbd_audio_if.c **** }
+ 110              		.loc 1 96 1 is_stmt 0 view .LVU20
+ 111 000c 2046     		mov	r0, r4
+ 112 000e 10BD     		pop	{r4, pc}
+ 113              	.L9:
+ 114              		.align	2
+ 115              	.L8:
+ 116 0010 00000000 		.word	g_usb_audio_playing
+ 117              		.cfi_endproc
+ 118              	.LFE68:
+ 120              		.section	.text.AUDIO_IF_VolumeCtl,"ax",%progbits
+ 121              		.align	1
+ 122              		.syntax unified
+ 123              		.thumb
+ 124              		.thumb_func
+ 126              	AUDIO_IF_VolumeCtl:
+ 127              	.LVL5:
+ 128              	.LFB70:
+  97:USB_DEVICE/App/usbd_audio_if.c **** 
+  98:USB_DEVICE/App/usbd_audio_if.c **** /**
+  99:USB_DEVICE/App/usbd_audio_if.c ****   * @brief  AUDIO_CMD_START / PLAY / STOP を処理する
+ 100:USB_DEVICE/App/usbd_audio_if.c ****   *
+ 101:USB_DEVICE/App/usbd_audio_if.c ****   *   START: ホストからの最初の1周分データが揃った合図。
+ 102:USB_DEVICE/App/usbd_audio_if.c ****   *          リングバッファの先頭アドレスを保存し、TIM4割り込みを起動す�
+ 103:USB_DEVICE/App/usbd_audio_if.c ****   *   PLAY : Sync()がAUDIO_OFFSET_FULLで呼ばれた際の再同期チェックポイント。
+ 104:USB_DEVICE/App/usbd_audio_if.c ****   *          このアーキテクチャでは特に処理不要(no-op)。
+ 105:USB_DEVICE/App/usbd_audio_if.c ****   *   STOP : ホストが再生を止めた。TIM4を止め、無音を出力する。
+ 106:USB_DEVICE/App/usbd_audio_if.c ****   */
+ 107:USB_DEVICE/App/usbd_audio_if.c **** static int8_t AUDIO_IF_AudioCmd(uint8_t *pbuf, uint32_t size, uint8_t cmd)
+ARM GAS  /tmp/ccI6ORsy.s 			page 5
+
+
+ 108:USB_DEVICE/App/usbd_audio_if.c **** {
+ 109:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(size);
+ 110:USB_DEVICE/App/usbd_audio_if.c **** 
+ 111:USB_DEVICE/App/usbd_audio_if.c ****   switch (cmd)
+ 112:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 113:USB_DEVICE/App/usbd_audio_if.c ****     case AUDIO_CMD_START:
+ 114:USB_DEVICE/App/usbd_audio_if.c ****       g_audio_ring       = pbuf;   /* &haudio->buffer[0] */
+ 115:USB_DEVICE/App/usbd_audio_if.c ****       g_play_ptr         = 0U;
+ 116:USB_DEVICE/App/usbd_audio_if.c ****       g_bytes_since_sync = 0U;
+ 117:USB_DEVICE/App/usbd_audio_if.c ****       g_sync_half_toggle = 0U;
+ 118:USB_DEVICE/App/usbd_audio_if.c ****       g_usb_audio_playing = 1U;
+ 119:USB_DEVICE/App/usbd_audio_if.c ****       HAL_TIM_Base_Start_IT(&htim4);
+ 120:USB_DEVICE/App/usbd_audio_if.c ****       break;
+ 121:USB_DEVICE/App/usbd_audio_if.c **** 
+ 122:USB_DEVICE/App/usbd_audio_if.c ****     case AUDIO_CMD_PLAY:
+ 123:USB_DEVICE/App/usbd_audio_if.c ****       /* 再同期チェックポイント。g_play_ptrは常に自走しているのでno-op */
+ 124:USB_DEVICE/App/usbd_audio_if.c ****       break;
+ 125:USB_DEVICE/App/usbd_audio_if.c **** 
+ 126:USB_DEVICE/App/usbd_audio_if.c ****     case AUDIO_CMD_STOP:
+ 127:USB_DEVICE/App/usbd_audio_if.c ****       g_usb_audio_playing = 0U;
+ 128:USB_DEVICE/App/usbd_audio_if.c ****       HAL_TIM_Base_Stop_IT(&htim4);
+ 129:USB_DEVICE/App/usbd_audio_if.c ****       AUDIO_OutputSilence();
+ 130:USB_DEVICE/App/usbd_audio_if.c ****       break;
+ 131:USB_DEVICE/App/usbd_audio_if.c **** 
+ 132:USB_DEVICE/App/usbd_audio_if.c ****     default:
+ 133:USB_DEVICE/App/usbd_audio_if.c ****       break;
+ 134:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 135:USB_DEVICE/App/usbd_audio_if.c **** 
+ 136:USB_DEVICE/App/usbd_audio_if.c ****   return 0;
+ 137:USB_DEVICE/App/usbd_audio_if.c **** }
+ 138:USB_DEVICE/App/usbd_audio_if.c **** 
+ 139:USB_DEVICE/App/usbd_audio_if.c **** static int8_t AUDIO_IF_VolumeCtl(uint8_t vol)
+ 140:USB_DEVICE/App/usbd_audio_if.c **** {
+ 129              		.loc 1 140 1 is_stmt 1 view -0
+ 130              		.cfi_startproc
+ 131              		@ args = 0, pretend = 0, frame = 0
+ 132              		@ frame_needed = 0, uses_anonymous_args = 0
+ 133              		@ link register save eliminated.
+ 141:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(vol);
+ 134              		.loc 1 141 3 view .LVU22
+ 142:USB_DEVICE/App/usbd_audio_if.c ****   /* ボリューム制御は未実装(常にホスト側音量そのまま出力) */
+ 143:USB_DEVICE/App/usbd_audio_if.c ****   return 0;
+ 135              		.loc 1 143 3 view .LVU23
+ 144:USB_DEVICE/App/usbd_audio_if.c **** }
+ 136              		.loc 1 144 1 is_stmt 0 view .LVU24
+ 137 0000 0020     		movs	r0, #0
+ 138              	.LVL6:
+ 139              		.loc 1 144 1 view .LVU25
+ 140 0002 7047     		bx	lr
+ 141              		.cfi_endproc
+ 142              	.LFE70:
+ 144              		.section	.text.AUDIO_IF_MuteCtl,"ax",%progbits
+ 145              		.align	1
+ 146              		.syntax unified
+ 147              		.thumb
+ 148              		.thumb_func
+ 150              	AUDIO_IF_MuteCtl:
+ARM GAS  /tmp/ccI6ORsy.s 			page 6
+
+
+ 151              	.LVL7:
+ 152              	.LFB71:
+ 145:USB_DEVICE/App/usbd_audio_if.c **** 
+ 146:USB_DEVICE/App/usbd_audio_if.c **** static int8_t AUDIO_IF_MuteCtl(uint8_t cmd)
+ 147:USB_DEVICE/App/usbd_audio_if.c **** {
+ 153              		.loc 1 147 1 is_stmt 1 view -0
+ 154              		.cfi_startproc
+ 155              		@ args = 0, pretend = 0, frame = 0
+ 156              		@ frame_needed = 0, uses_anonymous_args = 0
+ 148:USB_DEVICE/App/usbd_audio_if.c ****   if (cmd != 0U)
+ 157              		.loc 1 148 3 view .LVU27
+ 158              		.loc 1 148 6 is_stmt 0 view .LVU28
+ 159 0000 08B9     		cbnz	r0, .L17
+ 149:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 150:USB_DEVICE/App/usbd_audio_if.c ****     AUDIO_OutputSilence();
+ 151:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 152:USB_DEVICE/App/usbd_audio_if.c ****   return 0;
+ 160              		.loc 1 152 3 is_stmt 1 view .LVU29
+ 153:USB_DEVICE/App/usbd_audio_if.c **** }
+ 161              		.loc 1 153 1 is_stmt 0 view .LVU30
+ 162 0002 0020     		movs	r0, #0
+ 163              	.LVL8:
+ 164              		.loc 1 153 1 view .LVU31
+ 165 0004 7047     		bx	lr
+ 166              	.LVL9:
+ 167              	.L17:
+ 147:USB_DEVICE/App/usbd_audio_if.c ****   if (cmd != 0U)
+ 168              		.loc 1 147 1 view .LVU32
+ 169 0006 08B5     		push	{r3, lr}
+ 170              	.LCFI2:
+ 171              		.cfi_def_cfa_offset 8
+ 172              		.cfi_offset 3, -8
+ 173              		.cfi_offset 14, -4
+ 150:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 174              		.loc 1 150 5 is_stmt 1 view .LVU33
+ 175 0008 FFF7FEFF 		bl	AUDIO_OutputSilence
+ 176              	.LVL10:
+ 152:USB_DEVICE/App/usbd_audio_if.c **** }
+ 177              		.loc 1 152 3 view .LVU34
+ 178              		.loc 1 153 1 is_stmt 0 view .LVU35
+ 179 000c 0020     		movs	r0, #0
+ 180 000e 08BD     		pop	{r3, pc}
+ 181              		.cfi_endproc
+ 182              	.LFE71:
+ 184              		.section	.text.AUDIO_IF_PeriodicTC,"ax",%progbits
+ 185              		.align	1
+ 186              		.syntax unified
+ 187              		.thumb
+ 188              		.thumb_func
+ 190              	AUDIO_IF_PeriodicTC:
+ 191              	.LVL11:
+ 192              	.LFB72:
+ 154:USB_DEVICE/App/usbd_audio_if.c **** 
+ 155:USB_DEVICE/App/usbd_audio_if.c **** static int8_t AUDIO_IF_PeriodicTC(uint8_t *pbuf, uint32_t size, uint8_t cmd)
+ 156:USB_DEVICE/App/usbd_audio_if.c **** {
+ 193              		.loc 1 156 1 is_stmt 1 view -0
+ 194              		.cfi_startproc
+ARM GAS  /tmp/ccI6ORsy.s 			page 7
+
+
+ 195              		@ args = 0, pretend = 0, frame = 0
+ 196              		@ frame_needed = 0, uses_anonymous_args = 0
+ 197              		@ link register save eliminated.
+ 157:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(pbuf);
+ 198              		.loc 1 157 3 view .LVU37
+ 158:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(size);
+ 199              		.loc 1 158 3 view .LVU38
+ 159:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(cmd);
+ 200              		.loc 1 159 3 view .LVU39
+ 160:USB_DEVICE/App/usbd_audio_if.c ****   /* 毎USBフレーム(1ms)ごとに呼ばれるが、再生自体はTIM4側で自走している�
+ 161:USB_DEVICE/App/usbd_audio_if.c ****      ここでは何もしない */
+ 162:USB_DEVICE/App/usbd_audio_if.c ****   return 0;
+ 201              		.loc 1 162 3 view .LVU40
+ 163:USB_DEVICE/App/usbd_audio_if.c **** }
+ 202              		.loc 1 163 1 is_stmt 0 view .LVU41
+ 203 0000 0020     		movs	r0, #0
+ 204              	.LVL12:
+ 205              		.loc 1 163 1 view .LVU42
+ 206 0002 7047     		bx	lr
+ 207              		.cfi_endproc
+ 208              	.LFE72:
+ 210              		.section	.text.AUDIO_IF_GetState,"ax",%progbits
+ 211              		.align	1
+ 212              		.syntax unified
+ 213              		.thumb
+ 214              		.thumb_func
+ 216              	AUDIO_IF_GetState:
+ 217              	.LFB73:
+ 164:USB_DEVICE/App/usbd_audio_if.c **** 
+ 165:USB_DEVICE/App/usbd_audio_if.c **** static int8_t AUDIO_IF_GetState(void)
+ 166:USB_DEVICE/App/usbd_audio_if.c **** {
+ 218              		.loc 1 166 1 is_stmt 1 view -0
+ 219              		.cfi_startproc
+ 220              		@ args = 0, pretend = 0, frame = 0
+ 221              		@ frame_needed = 0, uses_anonymous_args = 0
+ 222              		@ link register save eliminated.
+ 167:USB_DEVICE/App/usbd_audio_if.c ****   return 0;
+ 223              		.loc 1 167 3 view .LVU44
+ 168:USB_DEVICE/App/usbd_audio_if.c **** }
+ 224              		.loc 1 168 1 is_stmt 0 view .LVU45
+ 225 0000 0020     		movs	r0, #0
+ 226 0002 7047     		bx	lr
+ 227              		.cfi_endproc
+ 228              	.LFE73:
+ 230              		.section	.text.AUDIO_IF_AudioCmd,"ax",%progbits
+ 231              		.align	1
+ 232              		.syntax unified
+ 233              		.thumb
+ 234              		.thumb_func
+ 236              	AUDIO_IF_AudioCmd:
+ 237              	.LVL13:
+ 238              	.LFB69:
+ 108:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(size);
+ 239              		.loc 1 108 1 is_stmt 1 view -0
+ 240              		.cfi_startproc
+ 241              		@ args = 0, pretend = 0, frame = 0
+ 242              		@ frame_needed = 0, uses_anonymous_args = 0
+ARM GAS  /tmp/ccI6ORsy.s 			page 8
+
+
+ 108:USB_DEVICE/App/usbd_audio_if.c ****   UNUSED(size);
+ 243              		.loc 1 108 1 is_stmt 0 view .LVU47
+ 244 0000 08B5     		push	{r3, lr}
+ 245              	.LCFI3:
+ 246              		.cfi_def_cfa_offset 8
+ 247              		.cfi_offset 3, -8
+ 248              		.cfi_offset 14, -4
+ 109:USB_DEVICE/App/usbd_audio_if.c **** 
+ 249              		.loc 1 109 3 is_stmt 1 view .LVU48
+ 111:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 250              		.loc 1 111 3 view .LVU49
+ 251 0002 012A     		cmp	r2, #1
+ 252 0004 0AD0     		beq	.L21
+ 253 0006 032A     		cmp	r2, #3
+ 254 0008 17D1     		bne	.L23
+ 127:USB_DEVICE/App/usbd_audio_if.c ****       HAL_TIM_Base_Stop_IT(&htim4);
+ 255              		.loc 1 127 7 view .LVU50
+ 127:USB_DEVICE/App/usbd_audio_if.c ****       HAL_TIM_Base_Stop_IT(&htim4);
+ 256              		.loc 1 127 27 is_stmt 0 view .LVU51
+ 257 000a 0D4B     		ldr	r3, .L25
+ 258 000c 0022     		movs	r2, #0
+ 259              	.LVL14:
+ 127:USB_DEVICE/App/usbd_audio_if.c ****       HAL_TIM_Base_Stop_IT(&htim4);
+ 260              		.loc 1 127 27 view .LVU52
+ 261 000e 1A70     		strb	r2, [r3]
+ 128:USB_DEVICE/App/usbd_audio_if.c ****       AUDIO_OutputSilence();
+ 262              		.loc 1 128 7 is_stmt 1 view .LVU53
+ 263 0010 0C48     		ldr	r0, .L25+4
+ 264              	.LVL15:
+ 128:USB_DEVICE/App/usbd_audio_if.c ****       AUDIO_OutputSilence();
+ 265              		.loc 1 128 7 is_stmt 0 view .LVU54
+ 266 0012 FFF7FEFF 		bl	HAL_TIM_Base_Stop_IT
+ 267              	.LVL16:
+ 129:USB_DEVICE/App/usbd_audio_if.c ****       break;
+ 268              		.loc 1 129 7 is_stmt 1 view .LVU55
+ 269 0016 FFF7FEFF 		bl	AUDIO_OutputSilence
+ 270              	.LVL17:
+ 130:USB_DEVICE/App/usbd_audio_if.c **** 
+ 271              		.loc 1 130 7 view .LVU56
+ 272 001a 0EE0     		b	.L23
+ 273              	.LVL18:
+ 274              	.L21:
+ 114:USB_DEVICE/App/usbd_audio_if.c ****       g_play_ptr         = 0U;
+ 275              		.loc 1 114 7 view .LVU57
+ 114:USB_DEVICE/App/usbd_audio_if.c ****       g_play_ptr         = 0U;
+ 276              		.loc 1 114 26 is_stmt 0 view .LVU58
+ 277 001c 0A4B     		ldr	r3, .L25+8
+ 278 001e 1860     		str	r0, [r3]
+ 115:USB_DEVICE/App/usbd_audio_if.c ****       g_bytes_since_sync = 0U;
+ 279              		.loc 1 115 7 is_stmt 1 view .LVU59
+ 115:USB_DEVICE/App/usbd_audio_if.c ****       g_bytes_since_sync = 0U;
+ 280              		.loc 1 115 26 is_stmt 0 view .LVU60
+ 281 0020 0023     		movs	r3, #0
+ 282 0022 0A4A     		ldr	r2, .L25+12
+ 283              	.LVL19:
+ 115:USB_DEVICE/App/usbd_audio_if.c ****       g_bytes_since_sync = 0U;
+ 284              		.loc 1 115 26 view .LVU61
+ARM GAS  /tmp/ccI6ORsy.s 			page 9
+
+
+ 285 0024 1360     		str	r3, [r2]
+ 116:USB_DEVICE/App/usbd_audio_if.c ****       g_sync_half_toggle = 0U;
+ 286              		.loc 1 116 7 is_stmt 1 view .LVU62
+ 116:USB_DEVICE/App/usbd_audio_if.c ****       g_sync_half_toggle = 0U;
+ 287              		.loc 1 116 26 is_stmt 0 view .LVU63
+ 288 0026 0A4A     		ldr	r2, .L25+16
+ 289 0028 1360     		str	r3, [r2]
+ 117:USB_DEVICE/App/usbd_audio_if.c ****       g_usb_audio_playing = 1U;
+ 290              		.loc 1 117 7 is_stmt 1 view .LVU64
+ 117:USB_DEVICE/App/usbd_audio_if.c ****       g_usb_audio_playing = 1U;
+ 291              		.loc 1 117 26 is_stmt 0 view .LVU65
+ 292 002a 0A4A     		ldr	r2, .L25+20
+ 293 002c 1370     		strb	r3, [r2]
+ 118:USB_DEVICE/App/usbd_audio_if.c ****       HAL_TIM_Base_Start_IT(&htim4);
+ 294              		.loc 1 118 7 is_stmt 1 view .LVU66
+ 118:USB_DEVICE/App/usbd_audio_if.c ****       HAL_TIM_Base_Start_IT(&htim4);
+ 295              		.loc 1 118 27 is_stmt 0 view .LVU67
+ 296 002e 044B     		ldr	r3, .L25
+ 297 0030 0122     		movs	r2, #1
+ 298 0032 1A70     		strb	r2, [r3]
+ 119:USB_DEVICE/App/usbd_audio_if.c ****       break;
+ 299              		.loc 1 119 7 is_stmt 1 view .LVU68
+ 300 0034 0348     		ldr	r0, .L25+4
+ 301              	.LVL20:
+ 119:USB_DEVICE/App/usbd_audio_if.c ****       break;
+ 302              		.loc 1 119 7 is_stmt 0 view .LVU69
+ 303 0036 FFF7FEFF 		bl	HAL_TIM_Base_Start_IT
+ 304              	.LVL21:
+ 120:USB_DEVICE/App/usbd_audio_if.c **** 
+ 305              		.loc 1 120 7 is_stmt 1 view .LVU70
+ 306              	.L23:
+ 136:USB_DEVICE/App/usbd_audio_if.c **** }
+ 307              		.loc 1 136 3 view .LVU71
+ 137:USB_DEVICE/App/usbd_audio_if.c **** 
+ 308              		.loc 1 137 1 is_stmt 0 view .LVU72
+ 309 003a 0020     		movs	r0, #0
+ 310 003c 08BD     		pop	{r3, pc}
+ 311              	.L26:
+ 312 003e 00BF     		.align	2
+ 313              	.L25:
+ 314 0040 00000000 		.word	g_usb_audio_playing
+ 315 0044 00000000 		.word	htim4
+ 316 0048 00000000 		.word	g_audio_ring
+ 317 004c 00000000 		.word	g_play_ptr
+ 318 0050 00000000 		.word	g_bytes_since_sync
+ 319 0054 00000000 		.word	g_sync_half_toggle
+ 320              		.cfi_endproc
+ 321              	.LFE69:
+ 323              		.section	.text.MX_TIM4_Init,"ax",%progbits
+ 324              		.align	1
+ 325              		.global	MX_TIM4_Init
+ 326              		.syntax unified
+ 327              		.thumb
+ 328              		.thumb_func
+ 330              	MX_TIM4_Init:
+ 331              	.LFB74:
+ 169:USB_DEVICE/App/usbd_audio_if.c **** 
+ARM GAS  /tmp/ccI6ORsy.s 			page 10
+
+
+ 170:USB_DEVICE/App/usbd_audio_if.c **** /* ============================================================================
+ 171:USB_DEVICE/App/usbd_audio_if.c ****  * TIM4 : オーディオサンプルレート(USBD_AUDIO_FREQ Hz)割り込みタイマー
+ 172:USB_DEVICE/App/usbd_audio_if.c ****  *
+ 173:USB_DEVICE/App/usbd_audio_if.c ****  *   72MHz / (ARR+1) = USBD_AUDIO_FREQ
+ 174:USB_DEVICE/App/usbd_audio_if.c ****  * ==========================================================================*/
+ 175:USB_DEVICE/App/usbd_audio_if.c **** void MX_TIM4_Init(void)
+ 176:USB_DEVICE/App/usbd_audio_if.c **** {
+ 332              		.loc 1 176 1 is_stmt 1 view -0
+ 333              		.cfi_startproc
+ 334              		@ args = 0, pretend = 0, frame = 32
+ 335              		@ frame_needed = 0, uses_anonymous_args = 0
+ 336 0000 00B5     		push	{lr}
+ 337              	.LCFI4:
+ 338              		.cfi_def_cfa_offset 4
+ 339              		.cfi_offset 14, -4
+ 340 0002 89B0     		sub	sp, sp, #36
+ 341              	.LCFI5:
+ 342              		.cfi_def_cfa_offset 40
+ 177:USB_DEVICE/App/usbd_audio_if.c ****   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+ 343              		.loc 1 177 3 view .LVU74
+ 344              		.loc 1 177 26 is_stmt 0 view .LVU75
+ 345 0004 0023     		movs	r3, #0
+ 346 0006 0493     		str	r3, [sp, #16]
+ 347 0008 0593     		str	r3, [sp, #20]
+ 348 000a 0693     		str	r3, [sp, #24]
+ 349 000c 0793     		str	r3, [sp, #28]
+ 178:USB_DEVICE/App/usbd_audio_if.c ****   TIM_MasterConfigTypeDef sMasterConfig = {0};
+ 350              		.loc 1 178 3 is_stmt 1 view .LVU76
+ 351              		.loc 1 178 27 is_stmt 0 view .LVU77
+ 352 000e 0293     		str	r3, [sp, #8]
+ 353 0010 0393     		str	r3, [sp, #12]
+ 179:USB_DEVICE/App/usbd_audio_if.c **** 
+ 180:USB_DEVICE/App/usbd_audio_if.c ****   uint32_t arr = (72000000U / USBD_AUDIO_FREQ) - 1U;
+ 354              		.loc 1 180 3 is_stmt 1 view .LVU78
+ 355              	.LVL22:
+ 181:USB_DEVICE/App/usbd_audio_if.c **** 
+ 182:USB_DEVICE/App/usbd_audio_if.c ****   htim4.Instance               = TIM4;
+ 356              		.loc 1 182 3 view .LVU79
+ 357              		.loc 1 182 32 is_stmt 0 view .LVU80
+ 358 0012 1E48     		ldr	r0, .L35
+ 359 0014 1E4A     		ldr	r2, .L35+4
+ 360 0016 0260     		str	r2, [r0]
+ 183:USB_DEVICE/App/usbd_audio_if.c ****   htim4.Init.Prescaler         = 0;
+ 361              		.loc 1 183 3 is_stmt 1 view .LVU81
+ 362              		.loc 1 183 32 is_stmt 0 view .LVU82
+ 363 0018 4360     		str	r3, [r0, #4]
+ 184:USB_DEVICE/App/usbd_audio_if.c ****   htim4.Init.CounterMode       = TIM_COUNTERMODE_UP;
+ 364              		.loc 1 184 3 is_stmt 1 view .LVU83
+ 365              		.loc 1 184 32 is_stmt 0 view .LVU84
+ 366 001a 8360     		str	r3, [r0, #8]
+ 185:USB_DEVICE/App/usbd_audio_if.c ****   htim4.Init.Period            = arr;
+ 367              		.loc 1 185 3 is_stmt 1 view .LVU85
+ 368              		.loc 1 185 32 is_stmt 0 view .LVU86
+ 369 001c 41F29312 		movw	r2, #4499
+ 370 0020 C260     		str	r2, [r0, #12]
+ 186:USB_DEVICE/App/usbd_audio_if.c ****   htim4.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+ 371              		.loc 1 186 3 is_stmt 1 view .LVU87
+ARM GAS  /tmp/ccI6ORsy.s 			page 11
+
+
+ 372              		.loc 1 186 32 is_stmt 0 view .LVU88
+ 373 0022 0361     		str	r3, [r0, #16]
+ 187:USB_DEVICE/App/usbd_audio_if.c ****   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+ 374              		.loc 1 187 3 is_stmt 1 view .LVU89
+ 375              		.loc 1 187 32 is_stmt 0 view .LVU90
+ 376 0024 8023     		movs	r3, #128
+ 377 0026 8361     		str	r3, [r0, #24]
+ 188:USB_DEVICE/App/usbd_audio_if.c ****   if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+ 378              		.loc 1 188 3 is_stmt 1 view .LVU91
+ 379              		.loc 1 188 7 is_stmt 0 view .LVU92
+ 380 0028 FFF7FEFF 		bl	HAL_TIM_Base_Init
+ 381              	.LVL23:
+ 382              		.loc 1 188 6 discriminator 1 view .LVU93
+ 383 002c 20BB     		cbnz	r0, .L32
+ 384              	.L28:
+ 189:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 190:USB_DEVICE/App/usbd_audio_if.c ****     Error_Handler();
+ 191:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 192:USB_DEVICE/App/usbd_audio_if.c **** 
+ 193:USB_DEVICE/App/usbd_audio_if.c ****   sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+ 385              		.loc 1 193 3 is_stmt 1 view .LVU94
+ 386              		.loc 1 193 34 is_stmt 0 view .LVU95
+ 387 002e 4FF48053 		mov	r3, #4096
+ 388 0032 0493     		str	r3, [sp, #16]
+ 194:USB_DEVICE/App/usbd_audio_if.c ****   if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+ 389              		.loc 1 194 3 is_stmt 1 view .LVU96
+ 390              		.loc 1 194 7 is_stmt 0 view .LVU97
+ 391 0034 04A9     		add	r1, sp, #16
+ 392 0036 1548     		ldr	r0, .L35
+ 393 0038 FFF7FEFF 		bl	HAL_TIM_ConfigClockSource
+ 394              	.LVL24:
+ 395              		.loc 1 194 6 discriminator 1 view .LVU98
+ 396 003c F8B9     		cbnz	r0, .L33
+ 397              	.L29:
+ 195:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 196:USB_DEVICE/App/usbd_audio_if.c ****     Error_Handler();
+ 197:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 198:USB_DEVICE/App/usbd_audio_if.c **** 
+ 199:USB_DEVICE/App/usbd_audio_if.c ****   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+ 398              		.loc 1 199 3 is_stmt 1 view .LVU99
+ 399              		.loc 1 199 37 is_stmt 0 view .LVU100
+ 400 003e 0023     		movs	r3, #0
+ 401 0040 0293     		str	r3, [sp, #8]
+ 200:USB_DEVICE/App/usbd_audio_if.c ****   sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+ 402              		.loc 1 200 3 is_stmt 1 view .LVU101
+ 403              		.loc 1 200 37 is_stmt 0 view .LVU102
+ 404 0042 0393     		str	r3, [sp, #12]
+ 201:USB_DEVICE/App/usbd_audio_if.c ****   if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+ 405              		.loc 1 201 3 is_stmt 1 view .LVU103
+ 406              		.loc 1 201 7 is_stmt 0 view .LVU104
+ 407 0044 02A9     		add	r1, sp, #8
+ 408 0046 1148     		ldr	r0, .L35
+ 409 0048 FFF7FEFF 		bl	HAL_TIMEx_MasterConfigSynchronization
+ 410              	.LVL25:
+ 411              		.loc 1 201 6 discriminator 1 view .LVU105
+ 412 004c D0B9     		cbnz	r0, .L34
+ 413              	.L30:
+ARM GAS  /tmp/ccI6ORsy.s 			page 12
+
+
+ 202:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 203:USB_DEVICE/App/usbd_audio_if.c ****     Error_Handler();
+ 204:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 205:USB_DEVICE/App/usbd_audio_if.c **** 
+ 206:USB_DEVICE/App/usbd_audio_if.c ****   __HAL_RCC_TIM4_CLK_ENABLE();
+ 414              		.loc 1 206 3 is_stmt 1 view .LVU106
+ 415              	.LBB2:
+ 416              		.loc 1 206 3 view .LVU107
+ 417              		.loc 1 206 3 view .LVU108
+ 418 004e 114B     		ldr	r3, .L35+8
+ 419 0050 DA69     		ldr	r2, [r3, #28]
+ 420 0052 42F00402 		orr	r2, r2, #4
+ 421 0056 DA61     		str	r2, [r3, #28]
+ 422              		.loc 1 206 3 view .LVU109
+ 423 0058 DB69     		ldr	r3, [r3, #28]
+ 424 005a 03F00403 		and	r3, r3, #4
+ 425 005e 0193     		str	r3, [sp, #4]
+ 426              		.loc 1 206 3 view .LVU110
+ 427 0060 019B     		ldr	r3, [sp, #4]
+ 428              	.LBE2:
+ 429              		.loc 1 206 3 view .LVU111
+ 207:USB_DEVICE/App/usbd_audio_if.c ****   HAL_NVIC_SetPriority(TIM4_IRQn, 2, 0);
+ 430              		.loc 1 207 3 view .LVU112
+ 431 0062 0022     		movs	r2, #0
+ 432 0064 0221     		movs	r1, #2
+ 433 0066 1E20     		movs	r0, #30
+ 434 0068 FFF7FEFF 		bl	HAL_NVIC_SetPriority
+ 435              	.LVL26:
+ 208:USB_DEVICE/App/usbd_audio_if.c ****   HAL_NVIC_EnableIRQ(TIM4_IRQn);
+ 436              		.loc 1 208 3 view .LVU113
+ 437 006c 1E20     		movs	r0, #30
+ 438 006e FFF7FEFF 		bl	HAL_NVIC_EnableIRQ
+ 439              	.LVL27:
+ 209:USB_DEVICE/App/usbd_audio_if.c **** 
+ 210:USB_DEVICE/App/usbd_audio_if.c ****   /* HAL_TIM_Base_Start_IT()自体はAUDIO_CMD_START受信時に呼ぶので
+ 211:USB_DEVICE/App/usbd_audio_if.c ****      ここではペリフェラルの初期化のみ行う */
+ 212:USB_DEVICE/App/usbd_audio_if.c **** }
+ 440              		.loc 1 212 1 is_stmt 0 view .LVU114
+ 441 0072 09B0     		add	sp, sp, #36
+ 442              	.LCFI6:
+ 443              		.cfi_remember_state
+ 444              		.cfi_def_cfa_offset 4
+ 445              		@ sp needed
+ 446 0074 5DF804FB 		ldr	pc, [sp], #4
+ 447              	.L32:
+ 448              	.LCFI7:
+ 449              		.cfi_restore_state
+ 190:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 450              		.loc 1 190 5 is_stmt 1 view .LVU115
+ 451 0078 FFF7FEFF 		bl	Error_Handler
+ 452              	.LVL28:
+ 453 007c D7E7     		b	.L28
+ 454              	.L33:
+ 196:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 455              		.loc 1 196 5 view .LVU116
+ 456 007e FFF7FEFF 		bl	Error_Handler
+ 457              	.LVL29:
+ARM GAS  /tmp/ccI6ORsy.s 			page 13
+
+
+ 458 0082 DCE7     		b	.L29
+ 459              	.L34:
+ 203:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 460              		.loc 1 203 5 view .LVU117
+ 461 0084 FFF7FEFF 		bl	Error_Handler
+ 462              	.LVL30:
+ 463 0088 E1E7     		b	.L30
+ 464              	.L36:
+ 465 008a 00BF     		.align	2
+ 466              	.L35:
+ 467 008c 00000000 		.word	htim4
+ 468 0090 00080040 		.word	1073743872
+ 469 0094 00100240 		.word	1073876992
+ 470              		.cfi_endproc
+ 471              	.LFE74:
+ 473              		.section	.text.HAL_TIM_PeriodElapsedCallback,"ax",%progbits
+ 474              		.align	1
+ 475              		.global	HAL_TIM_PeriodElapsedCallback
+ 476              		.syntax unified
+ 477              		.thumb
+ 478              		.thumb_func
+ 480              	HAL_TIM_PeriodElapsedCallback:
+ 481              	.LVL31:
+ 482              	.LFB75:
+ 213:USB_DEVICE/App/usbd_audio_if.c **** 
+ 214:USB_DEVICE/App/usbd_audio_if.c **** extern USBD_HandleTypeDef hUsbDeviceFS;
+ 215:USB_DEVICE/App/usbd_audio_if.c **** 
+ 216:USB_DEVICE/App/usbd_audio_if.c **** /* TIM4_IRQHandler は stm32f1xx_it.c 側に集約する */
+ 217:USB_DEVICE/App/usbd_audio_if.c **** 
+ 218:USB_DEVICE/App/usbd_audio_if.c **** /**
+ 219:USB_DEVICE/App/usbd_audio_if.c ****   * @brief  TIM周期割り込みコールバック (TIM4のみ処理)
+ 220:USB_DEVICE/App/usbd_audio_if.c ****   *
+ 221:USB_DEVICE/App/usbd_audio_if.c ****   *  毎回1サンプル(L16+R16 = 4byte)をリングバッファから取り出し、
+ 222:USB_DEVICE/App/usbd_audio_if.c ****   *  0..65535 の符号なし範囲に変換してPWM CCRへ反映する。
+ 223:USB_DEVICE/App/usbd_audio_if.c ****   */
+ 224:USB_DEVICE/App/usbd_audio_if.c **** void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+ 225:USB_DEVICE/App/usbd_audio_if.c **** {
+ 483              		.loc 1 225 1 view -0
+ 484              		.cfi_startproc
+ 485              		@ args = 0, pretend = 0, frame = 0
+ 486              		@ frame_needed = 0, uses_anonymous_args = 0
+ 226:USB_DEVICE/App/usbd_audio_if.c ****   if (htim->Instance != TIM4)
+ 487              		.loc 1 226 3 view .LVU119
+ 488              		.loc 1 226 11 is_stmt 0 view .LVU120
+ 489 0000 0268     		ldr	r2, [r0]
+ 490              		.loc 1 226 6 view .LVU121
+ 491 0002 2E4B     		ldr	r3, .L47
+ 492 0004 9A42     		cmp	r2, r3
+ 493 0006 00D0     		beq	.L46
+ 494              	.LVL32:
+ 495              	.L43:
+ 496              		.loc 1 226 6 view .LVU122
+ 497 0008 7047     		bx	lr
+ 498              	.LVL33:
+ 499              	.L46:
+ 227:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 228:USB_DEVICE/App/usbd_audio_if.c ****     return;
+ARM GAS  /tmp/ccI6ORsy.s 			page 14
+
+
+ 229:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 230:USB_DEVICE/App/usbd_audio_if.c **** 
+ 231:USB_DEVICE/App/usbd_audio_if.c ****   if ((g_usb_audio_playing == 0U) || (g_audio_ring == NULL))
+ 500              		.loc 1 231 3 is_stmt 1 view .LVU123
+ 501              		.loc 1 231 28 is_stmt 0 view .LVU124
+ 502 000a 2D4B     		ldr	r3, .L47+4
+ 503 000c 1B78     		ldrb	r3, [r3]	@ zero_extendqisi2
+ 504              		.loc 1 231 6 view .LVU125
+ 505 000e 002B     		cmp	r3, #0
+ 506 0010 FAD0     		beq	.L43
+ 507              		.loc 1 231 52 discriminator 1 view .LVU126
+ 508 0012 2C4B     		ldr	r3, .L47+8
+ 509 0014 1868     		ldr	r0, [r3]
+ 510              	.LVL34:
+ 511              		.loc 1 231 35 discriminator 1 view .LVU127
+ 512 0016 0028     		cmp	r0, #0
+ 513 0018 F6D0     		beq	.L43
+ 225:USB_DEVICE/App/usbd_audio_if.c ****   if (htim->Instance != TIM4)
+ 514              		.loc 1 225 1 view .LVU128
+ 515 001a 10B5     		push	{r4, lr}
+ 516              	.LCFI8:
+ 517              		.cfi_def_cfa_offset 8
+ 518              		.cfi_offset 4, -8
+ 519              		.cfi_offset 14, -4
+ 232:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 233:USB_DEVICE/App/usbd_audio_if.c ****     return;
+ 234:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 235:USB_DEVICE/App/usbd_audio_if.c **** 
+ 236:USB_DEVICE/App/usbd_audio_if.c ****   /* AUDIO_TOTAL_BUF_SIZE = usbd_audio.h で定義されるリング全体のバイト数 */
+ 237:USB_DEVICE/App/usbd_audio_if.c ****   const uint32_t ring_size = AUDIO_TOTAL_BUF_SIZE;
+ 520              		.loc 1 237 3 is_stmt 1 view .LVU129
+ 521              	.LVL35:
+ 238:USB_DEVICE/App/usbd_audio_if.c **** 
+ 239:USB_DEVICE/App/usbd_audio_if.c ****   /* リトルエンディアンで L16, R16 を取り出す */
+ 240:USB_DEVICE/App/usbd_audio_if.c ****   int16_t left  = (int16_t)((uint16_t)g_audio_ring[g_play_ptr] |
+ 522              		.loc 1 240 3 view .LVU130
+ 523              		.loc 1 240 51 is_stmt 0 view .LVU131
+ 524 001c 2A49     		ldr	r1, .L47+12
+ 525 001e 0B68     		ldr	r3, [r1]
+ 526 0020 C25C     		ldrb	r2, [r0, r3]	@ zero_extendqisi2
+ 241:USB_DEVICE/App/usbd_audio_if.c ****                              ((uint16_t)g_audio_ring[g_play_ptr + 1U] << 8));
+ 527              		.loc 1 241 53 view .LVU132
+ 528 0022 0B68     		ldr	r3, [r1]
+ 529 0024 0133     		adds	r3, r3, #1
+ 530 0026 C35C     		ldrb	r3, [r0, r3]	@ zero_extendqisi2
+ 240:USB_DEVICE/App/usbd_audio_if.c ****                              ((uint16_t)g_audio_ring[g_play_ptr + 1U] << 8));
+ 531              		.loc 1 240 19 view .LVU133
+ 532 0028 1B02     		lsls	r3, r3, #8
+ 533 002a 1BB2     		sxth	r3, r3
+ 240:USB_DEVICE/App/usbd_audio_if.c ****                              ((uint16_t)g_audio_ring[g_play_ptr + 1U] << 8));
+ 534              		.loc 1 240 11 view .LVU134
+ 535 002c 1A43     		orrs	r2, r2, r3
+ 536              	.LVL36:
+ 242:USB_DEVICE/App/usbd_audio_if.c ****   int16_t right = (int16_t)((uint16_t)g_audio_ring[g_play_ptr + 2U] |
+ 537              		.loc 1 242 3 is_stmt 1 view .LVU135
+ 538              		.loc 1 242 51 is_stmt 0 view .LVU136
+ 539 002e 0B68     		ldr	r3, [r1]
+ARM GAS  /tmp/ccI6ORsy.s 			page 15
+
+
+ 540 0030 0233     		adds	r3, r3, #2
+ 541 0032 C35C     		ldrb	r3, [r0, r3]	@ zero_extendqisi2
+ 243:USB_DEVICE/App/usbd_audio_if.c ****                              ((uint16_t)g_audio_ring[g_play_ptr + 3U] << 8));
+ 542              		.loc 1 243 53 view .LVU137
+ 543 0034 0C68     		ldr	r4, [r1]
+ 544 0036 04F1030C 		add	ip, r4, #3
+ 545 003a 10F80C00 		ldrb	r0, [r0, ip]	@ zero_extendqisi2
+ 242:USB_DEVICE/App/usbd_audio_if.c ****   int16_t right = (int16_t)((uint16_t)g_audio_ring[g_play_ptr + 2U] |
+ 546              		.loc 1 242 19 view .LVU138
+ 547 003e 0002     		lsls	r0, r0, #8
+ 548 0040 00B2     		sxth	r0, r0
+ 242:USB_DEVICE/App/usbd_audio_if.c ****   int16_t right = (int16_t)((uint16_t)g_audio_ring[g_play_ptr + 2U] |
+ 549              		.loc 1 242 11 view .LVU139
+ 550 0042 0343     		orrs	r3, r3, r0
+ 551              	.LVL37:
+ 244:USB_DEVICE/App/usbd_audio_if.c **** 
+ 245:USB_DEVICE/App/usbd_audio_if.c ****   g_play_ptr += 4U;
+ 552              		.loc 1 245 3 is_stmt 1 view .LVU140
+ 553              		.loc 1 245 14 is_stmt 0 view .LVU141
+ 554 0044 0868     		ldr	r0, [r1]
+ 555 0046 0430     		adds	r0, r0, #4
+ 556 0048 0860     		str	r0, [r1]
+ 246:USB_DEVICE/App/usbd_audio_if.c ****   if (g_play_ptr >= ring_size)
+ 557              		.loc 1 246 3 is_stmt 1 view .LVU142
+ 558              		.loc 1 246 18 is_stmt 0 view .LVU143
+ 559 004a 0968     		ldr	r1, [r1]
+ 560              		.loc 1 246 6 view .LVU144
+ 561 004c B1F5206F 		cmp	r1, #2560
+ 562 0050 02D3     		bcc	.L39
+ 247:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 248:USB_DEVICE/App/usbd_audio_if.c ****     g_play_ptr = 0U;
+ 563              		.loc 1 248 5 is_stmt 1 view .LVU145
+ 564              		.loc 1 248 16 is_stmt 0 view .LVU146
+ 565 0052 1D49     		ldr	r1, .L47+12
+ 566 0054 0020     		movs	r0, #0
+ 567 0056 0860     		str	r0, [r1]
+ 568              	.L39:
+ 249:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 250:USB_DEVICE/App/usbd_audio_if.c **** 
+ 251:USB_DEVICE/App/usbd_audio_if.c ****   /* signed 16bit (-32768..32767) -> unsigned 0..65535 -> PWM CCR範囲 */
+ 252:USB_DEVICE/App/usbd_audio_if.c ****   uint32_t uleft  = (uint32_t)((int32_t)left  + 32768);
+ 569              		.loc 1 252 3 is_stmt 1 view .LVU147
+ 570              		.loc 1 252 47 is_stmt 0 view .LVU148
+ 571 0058 02F50042 		add	r2, r2, #32768
+ 572              	.LVL38:
+ 253:USB_DEVICE/App/usbd_audio_if.c ****   uint32_t uright = (uint32_t)((int32_t)right + 32768);
+ 573              		.loc 1 253 3 is_stmt 1 view .LVU149
+ 574              		.loc 1 253 47 is_stmt 0 view .LVU150
+ 575 005c 03F50043 		add	r3, r3, #32768
+ 576              	.LVL39:
+ 254:USB_DEVICE/App/usbd_audio_if.c **** 
+ 255:USB_DEVICE/App/usbd_audio_if.c ****   uint32_t ccrL = PWM_CCR_MIN + (uleft  * (PWM_CCR_MAX - PWM_CCR_MIN)) / 65535U;
+ 577              		.loc 1 255 3 is_stmt 1 view .LVU151
+ 578              		.loc 1 255 41 is_stmt 0 view .LVU152
+ 579 0060 4FF40770 		mov	r0, #540
+ 580 0064 00FB02F2 		mul	r2, r0, r2
+ 581              	.LVL40:
+ARM GAS  /tmp/ccI6ORsy.s 			page 16
+
+
+ 582              		.loc 1 255 72 view .LVU153
+ 583 0068 1849     		ldr	r1, .L47+16
+ 584 006a A1FB0242 		umull	r4, r2, r1, r2
+ 585 006e D20B     		lsrs	r2, r2, #15
+ 586              		.loc 1 255 12 view .LVU154
+ 587 0070 1E32     		adds	r2, r2, #30
+ 588              	.LVL41:
+ 256:USB_DEVICE/App/usbd_audio_if.c ****   uint32_t ccrR = PWM_CCR_MIN + (uright * (PWM_CCR_MAX - PWM_CCR_MIN)) / 65535U;
+ 589              		.loc 1 256 3 is_stmt 1 view .LVU155
+ 590              		.loc 1 256 41 is_stmt 0 view .LVU156
+ 591 0072 00FB03F3 		mul	r3, r0, r3
+ 592              	.LVL42:
+ 593              		.loc 1 256 72 view .LVU157
+ 594 0076 A1FB0313 		umull	r1, r3, r1, r3
+ 595 007a DB0B     		lsrs	r3, r3, #15
+ 596              		.loc 1 256 12 view .LVU158
+ 597 007c 1E33     		adds	r3, r3, #30
+ 598              	.LVL43:
+ 257:USB_DEVICE/App/usbd_audio_if.c **** 
+ 258:USB_DEVICE/App/usbd_audio_if.c ****   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccrL);
+ 599              		.loc 1 258 3 is_stmt 1 view .LVU159
+ 600 007e 1449     		ldr	r1, .L47+20
+ 601 0080 0968     		ldr	r1, [r1]
+ 602 0082 4A63     		str	r2, [r1, #52]
+ 259:USB_DEVICE/App/usbd_audio_if.c ****   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccrR);
+ 603              		.loc 1 259 3 view .LVU160
+ 604 0084 8B63     		str	r3, [r1, #56]
+ 260:USB_DEVICE/App/usbd_audio_if.c **** 
+ 261:USB_DEVICE/App/usbd_audio_if.c ****   /* 半周・1周ごとにUSBD_AUDIO_Syncを呼び、ホストとのクロックドリフト
+ 262:USB_DEVICE/App/usbd_audio_if.c ****      補正(usbd_audio.c内蔵の±4byte調整)を機能させる */
+ 263:USB_DEVICE/App/usbd_audio_if.c ****   g_bytes_since_sync += 4U;
+ 605              		.loc 1 263 3 view .LVU161
+ 606              		.loc 1 263 22 is_stmt 0 view .LVU162
+ 607 0086 134B     		ldr	r3, .L47+24
+ 608              	.LVL44:
+ 609              		.loc 1 263 22 view .LVU163
+ 610 0088 1A68     		ldr	r2, [r3]
+ 611              	.LVL45:
+ 612              		.loc 1 263 22 view .LVU164
+ 613 008a 0432     		adds	r2, r2, #4
+ 614 008c 1A60     		str	r2, [r3]
+ 615              	.LVL46:
+ 264:USB_DEVICE/App/usbd_audio_if.c ****   if (g_bytes_since_sync >= (ring_size / 2U))
+ 616              		.loc 1 264 3 is_stmt 1 view .LVU165
+ 617              		.loc 1 264 26 is_stmt 0 view .LVU166
+ 618 008e 1B68     		ldr	r3, [r3]
+ 619              		.loc 1 264 6 view .LVU167
+ 620 0090 B3F5A06F 		cmp	r3, #1280
+ 621 0094 0ED3     		bcc	.L37
+ 265:USB_DEVICE/App/usbd_audio_if.c ****   {
+ 266:USB_DEVICE/App/usbd_audio_if.c ****     g_bytes_since_sync = 0U;
+ 622              		.loc 1 266 5 is_stmt 1 view .LVU168
+ 623              		.loc 1 266 24 is_stmt 0 view .LVU169
+ 624 0096 0F4B     		ldr	r3, .L47+24
+ 625 0098 0022     		movs	r2, #0
+ 626 009a 1A60     		str	r2, [r3]
+ 267:USB_DEVICE/App/usbd_audio_if.c ****     g_sync_half_toggle = (uint8_t)(1U - g_sync_half_toggle);
+ARM GAS  /tmp/ccI6ORsy.s 			page 17
+
+
+ 627              		.loc 1 267 5 is_stmt 1 view .LVU170
+ 628              		.loc 1 267 26 is_stmt 0 view .LVU171
+ 629 009c 0E4A     		ldr	r2, .L47+28
+ 630 009e 1378     		ldrb	r3, [r2]	@ zero_extendqisi2
+ 631 00a0 C3F10103 		rsb	r3, r3, #1
+ 632 00a4 DBB2     		uxtb	r3, r3
+ 633              		.loc 1 267 24 view .LVU172
+ 634 00a6 1370     		strb	r3, [r2]
+ 268:USB_DEVICE/App/usbd_audio_if.c ****     USBD_AUDIO_Sync(&hUsbDeviceFS,
+ 635              		.loc 1 268 5 is_stmt 1 view .LVU173
+ 269:USB_DEVICE/App/usbd_audio_if.c ****                      (g_sync_half_toggle != 0U) ? AUDIO_OFFSET_FULL : AUDIO_OFFSET_HALF);
+ 636              		.loc 1 269 42 is_stmt 0 view .LVU174
+ 637 00a8 1378     		ldrb	r3, [r2]	@ zero_extendqisi2
+ 268:USB_DEVICE/App/usbd_audio_if.c ****     USBD_AUDIO_Sync(&hUsbDeviceFS,
+ 638              		.loc 1 268 5 view .LVU175
+ 639 00aa 23B1     		cbz	r3, .L41
+ 268:USB_DEVICE/App/usbd_audio_if.c ****     USBD_AUDIO_Sync(&hUsbDeviceFS,
+ 640              		.loc 1 268 5 discriminator 1 view .LVU176
+ 641 00ac 0221     		movs	r1, #2
+ 642              	.L40:
+ 268:USB_DEVICE/App/usbd_audio_if.c ****     USBD_AUDIO_Sync(&hUsbDeviceFS,
+ 643              		.loc 1 268 5 discriminator 4 view .LVU177
+ 644 00ae 0B48     		ldr	r0, .L47+32
+ 268:USB_DEVICE/App/usbd_audio_if.c ****     USBD_AUDIO_Sync(&hUsbDeviceFS,
+ 645              		.loc 1 268 5 discriminator 4 view .LVU178
+ 646 00b0 FFF7FEFF 		bl	USBD_AUDIO_Sync
+ 647              	.LVL47:
+ 648              	.L37:
+ 270:USB_DEVICE/App/usbd_audio_if.c ****   }
+ 271:USB_DEVICE/App/usbd_audio_if.c **** }
+ 649              		.loc 1 271 1 view .LVU179
+ 650 00b4 10BD     		pop	{r4, pc}
+ 651              	.L41:
+ 268:USB_DEVICE/App/usbd_audio_if.c ****                      (g_sync_half_toggle != 0U) ? AUDIO_OFFSET_FULL : AUDIO_OFFSET_HALF);
+ 652              		.loc 1 268 5 discriminator 2 view .LVU180
+ 653 00b6 0121     		movs	r1, #1
+ 654 00b8 F9E7     		b	.L40
+ 655              	.L48:
+ 656 00ba 00BF     		.align	2
+ 657              	.L47:
+ 658 00bc 00080040 		.word	1073743872
+ 659 00c0 00000000 		.word	g_usb_audio_playing
+ 660 00c4 00000000 		.word	g_audio_ring
+ 661 00c8 00000000 		.word	g_play_ptr
+ 662 00cc 01800080 		.word	-2147450879
+ 663 00d0 00000000 		.word	htim1
+ 664 00d4 00000000 		.word	g_bytes_since_sync
+ 665 00d8 00000000 		.word	g_sync_half_toggle
+ 666 00dc 00000000 		.word	hUsbDeviceFS
+ 667              		.cfi_endproc
+ 668              	.LFE75:
+ 670              		.global	USBD_AUDIO_fops
+ 671              		.section	.data.USBD_AUDIO_fops,"aw"
+ 672              		.align	2
+ 675              	USBD_AUDIO_fops:
+ 676 0000 00000000 		.word	AUDIO_IF_Init
+ 677 0004 00000000 		.word	AUDIO_IF_DeInit
+ARM GAS  /tmp/ccI6ORsy.s 			page 18
+
+
+ 678 0008 00000000 		.word	AUDIO_IF_AudioCmd
+ 679 000c 00000000 		.word	AUDIO_IF_VolumeCtl
+ 680 0010 00000000 		.word	AUDIO_IF_MuteCtl
+ 681 0014 00000000 		.word	AUDIO_IF_PeriodicTC
+ 682 0018 00000000 		.word	AUDIO_IF_GetState
+ 683              		.section	.bss.g_sync_half_toggle,"aw",%nobits
+ 686              	g_sync_half_toggle:
+ 687 0000 00       		.space	1
+ 688              		.section	.bss.g_bytes_since_sync,"aw",%nobits
+ 689              		.align	2
+ 692              	g_bytes_since_sync:
+ 693 0000 00000000 		.space	4
+ 694              		.section	.bss.g_play_ptr,"aw",%nobits
+ 695              		.align	2
+ 698              	g_play_ptr:
+ 699 0000 00000000 		.space	4
+ 700              		.section	.bss.g_audio_ring,"aw",%nobits
+ 701              		.align	2
+ 704              	g_audio_ring:
+ 705 0000 00000000 		.space	4
+ 706              		.global	g_usb_audio_playing
+ 707              		.section	.bss.g_usb_audio_playing,"aw",%nobits
+ 710              	g_usb_audio_playing:
+ 711 0000 00       		.space	1
+ 712              		.global	htim4
+ 713              		.section	.bss.htim4,"aw",%nobits
+ 714              		.align	2
+ 717              	htim4:
+ 718 0000 00000000 		.space	72
+ 718      00000000 
+ 718      00000000 
+ 718      00000000 
+ 718      00000000 
+ 719              		.text
+ 720              	.Letext0:
+ 721              		.file 2 "Drivers/CMSIS/Device/ST/STM32F1xx/Include/stm32f103xb.h"
+ 722              		.file 3 "/usr/lib/gcc/arm-none-eabi/13.2.1/include/stdint.h"
+ 723              		.file 4 "Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_def.h"
+ 724              		.file 5 "Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_dma.h"
+ 725              		.file 6 "Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim.h"
+ 726              		.file 7 "Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_def.h"
+ 727              		.file 8 "Middlewares/ST/STM32_USB_Device_Library/Class/AUDIO/Inc/usbd_audio.h"
+ 728              		.file 9 "USB_DEVICE/App/usbd_audio_if.h"
+ 729              		.file 10 "Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_cortex.h"
+ 730              		.file 11 "Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h"
+ 731              		.file 12 "Core/Inc/main.h"
+ARM GAS  /tmp/ccI6ORsy.s 			page 19
+
+
+DEFINED SYMBOLS
+                            *ABS*:00000000 usbd_audio_if.c
+     /tmp/ccI6ORsy.s:19     .text.AUDIO_OutputSilence:00000000 $t
+     /tmp/ccI6ORsy.s:24     .text.AUDIO_OutputSilence:00000000 AUDIO_OutputSilence
+     /tmp/ccI6ORsy.s:45     .text.AUDIO_OutputSilence:00000010 $d
+     /tmp/ccI6ORsy.s:50     .text.AUDIO_IF_Init:00000000 $t
+     /tmp/ccI6ORsy.s:55     .text.AUDIO_IF_Init:00000000 AUDIO_IF_Init
+     /tmp/ccI6ORsy.s:82     .text.AUDIO_IF_DeInit:00000000 $t
+     /tmp/ccI6ORsy.s:87     .text.AUDIO_IF_DeInit:00000000 AUDIO_IF_DeInit
+     /tmp/ccI6ORsy.s:116    .text.AUDIO_IF_DeInit:00000010 $d
+     /tmp/ccI6ORsy.s:710    .bss.g_usb_audio_playing:00000000 g_usb_audio_playing
+     /tmp/ccI6ORsy.s:121    .text.AUDIO_IF_VolumeCtl:00000000 $t
+     /tmp/ccI6ORsy.s:126    .text.AUDIO_IF_VolumeCtl:00000000 AUDIO_IF_VolumeCtl
+     /tmp/ccI6ORsy.s:145    .text.AUDIO_IF_MuteCtl:00000000 $t
+     /tmp/ccI6ORsy.s:150    .text.AUDIO_IF_MuteCtl:00000000 AUDIO_IF_MuteCtl
+     /tmp/ccI6ORsy.s:185    .text.AUDIO_IF_PeriodicTC:00000000 $t
+     /tmp/ccI6ORsy.s:190    .text.AUDIO_IF_PeriodicTC:00000000 AUDIO_IF_PeriodicTC
+     /tmp/ccI6ORsy.s:211    .text.AUDIO_IF_GetState:00000000 $t
+     /tmp/ccI6ORsy.s:216    .text.AUDIO_IF_GetState:00000000 AUDIO_IF_GetState
+     /tmp/ccI6ORsy.s:231    .text.AUDIO_IF_AudioCmd:00000000 $t
+     /tmp/ccI6ORsy.s:236    .text.AUDIO_IF_AudioCmd:00000000 AUDIO_IF_AudioCmd
+     /tmp/ccI6ORsy.s:314    .text.AUDIO_IF_AudioCmd:00000040 $d
+     /tmp/ccI6ORsy.s:717    .bss.htim4:00000000 htim4
+     /tmp/ccI6ORsy.s:704    .bss.g_audio_ring:00000000 g_audio_ring
+     /tmp/ccI6ORsy.s:698    .bss.g_play_ptr:00000000 g_play_ptr
+     /tmp/ccI6ORsy.s:692    .bss.g_bytes_since_sync:00000000 g_bytes_since_sync
+     /tmp/ccI6ORsy.s:686    .bss.g_sync_half_toggle:00000000 g_sync_half_toggle
+     /tmp/ccI6ORsy.s:324    .text.MX_TIM4_Init:00000000 $t
+     /tmp/ccI6ORsy.s:330    .text.MX_TIM4_Init:00000000 MX_TIM4_Init
+     /tmp/ccI6ORsy.s:467    .text.MX_TIM4_Init:0000008c $d
+     /tmp/ccI6ORsy.s:474    .text.HAL_TIM_PeriodElapsedCallback:00000000 $t
+     /tmp/ccI6ORsy.s:480    .text.HAL_TIM_PeriodElapsedCallback:00000000 HAL_TIM_PeriodElapsedCallback
+     /tmp/ccI6ORsy.s:658    .text.HAL_TIM_PeriodElapsedCallback:000000bc $d
+     /tmp/ccI6ORsy.s:675    .data.USBD_AUDIO_fops:00000000 USBD_AUDIO_fops
+     /tmp/ccI6ORsy.s:672    .data.USBD_AUDIO_fops:00000000 $d
+     /tmp/ccI6ORsy.s:687    .bss.g_sync_half_toggle:00000000 $d
+     /tmp/ccI6ORsy.s:689    .bss.g_bytes_since_sync:00000000 $d
+     /tmp/ccI6ORsy.s:695    .bss.g_play_ptr:00000000 $d
+     /tmp/ccI6ORsy.s:701    .bss.g_audio_ring:00000000 $d
+     /tmp/ccI6ORsy.s:711    .bss.g_usb_audio_playing:00000000 $d
+     /tmp/ccI6ORsy.s:714    .bss.htim4:00000000 $d
+
+UNDEFINED SYMBOLS
+htim1
+HAL_TIM_Base_Stop_IT
+HAL_TIM_Base_Start_IT
+HAL_TIM_Base_Init
+HAL_TIM_ConfigClockSource
+HAL_TIMEx_MasterConfigSynchronization
+HAL_NVIC_SetPriority
+HAL_NVIC_EnableIRQ
+Error_Handler
+USBD_AUDIO_Sync
+hUsbDeviceFS
