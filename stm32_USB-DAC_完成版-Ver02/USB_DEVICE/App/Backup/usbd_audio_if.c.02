@@ -1,0 +1,319 @@
+/**
+  ******************************************************************************
+  * @file    usbd_audio_if.c
+  * @brief   USB Audio再生エンジン本体
+  *
+  * ----------------------------------------------------------------------------
+  * 動作の流れ
+  * ----------------------------------------------------------------------------
+  *   PC (USB Audio Class 1.0, 16bit stereo, USBD_AUDIO_FREQ Hz)
+  *       ↓ (毎USBフレーム=1msごとにISOアウト転送)
+  *   usbd_audio.c (ST公式ミドルウェア)
+  *       ↓ haudio->buffer[] というリングバッファに書き込み
+  *   AUDIO_IF_AudioCmd(AUDIO_CMD_START) で
+  *       g_audio_ring = &haudio->buffer[0] を受け取り保持
+  *       ↓
+  *   TIM4 割り込み (USBD_AUDIO_FREQ Hzごとに発火)
+  *       g_audio_ring[g_play_ptr] から1サンプル(L16+R16=4byte)取り出し
+  *       ↓ 0..65535 にオフセットしてPWM CCR範囲にスケーリング
+  *   TIM1 CCR1(LEFT) / CCR2(RIGHT) 書き込み
+  *       ↓
+  *   TIM1 120kHz相補PWM出力 (PA8/PB13, PA9/PB14)
+  *
+  * リングバッファの読み出し位置(g_play_ptr)は書き込み側(wr_ptr)と
+  * 完全に独立したフリーランタイマーで進む。半周・1周進むごとに
+  * USBD_AUDIO_Sync() を呼び、ホストとの速度差(クロックドリフト)を
+  * ライブラリ内蔵の±4byte補正ロジックに反映させる。
+  * ----------------------------------------------------------------------------
+  */
+
+#include "usbd_audio_if.h"
+#include "main.h"
+
+
+/* ----------------------------------------------------------------------------
+ * PWM CCR 可動範囲 (main.ino側のTIM1設定と合わせること)
+ *   TIM1 Period=599, DeadTime=7 前提でのマージン込み範囲
+ * ----------------------------------------------------------------------------*/
+#define PWM_CCR_MIN   30U
+#define PWM_CCR_MAX   570U
+
+/* UART送信は割込み内で行わず、8サンプル平均をmain()へ渡す。 */
+#define PCM_DEBUG_AVERAGE_SAMPLES  8U
+#define PCM_DEBUG_QUEUE_SIZE       64U
+
+extern TIM_HandleTypeDef htim1;   /* main.ino側で定義されたTIM1(PWM)ハンドル */
+TIM_HandleTypeDef htim4;          /* このファイルで定義するオーディオサンプルタイマー */
+
+volatile uint8_t g_usb_audio_playing = 0U;
+
+static volatile uint8_t  *g_audio_ring      = NULL;
+static volatile uint32_t  g_play_ptr        = 0U;
+static volatile uint32_t  g_bytes_since_sync = 0U;
+static volatile uint8_t   g_sync_half_toggle = 0U;
+static volatile int16_t   g_debug_left[PCM_DEBUG_QUEUE_SIZE];
+static volatile int16_t   g_debug_right[PCM_DEBUG_QUEUE_SIZE];
+static volatile uint8_t   g_debug_write = 0U;
+static volatile uint8_t   g_debug_read = 0U;
+static int32_t            g_debug_left_sum = 0;
+static int32_t            g_debug_right_sum = 0;
+static uint8_t            g_debug_sample_count = 0U;
+
+static int8_t  AUDIO_IF_Init(uint32_t AudioFreq, uint32_t Volume, uint32_t options);
+static int8_t  AUDIO_IF_DeInit(uint32_t options);
+static int8_t  AUDIO_IF_AudioCmd(uint8_t *pbuf, uint32_t size, uint8_t cmd);
+static int8_t  AUDIO_IF_VolumeCtl(uint8_t vol);
+static int8_t  AUDIO_IF_MuteCtl(uint8_t cmd);
+static int8_t  AUDIO_IF_PeriodicTC(uint8_t *pbuf, uint32_t size, uint8_t cmd);
+static int8_t  AUDIO_IF_GetState(void);
+
+USBD_AUDIO_ItfTypeDef USBD_AUDIO_fops =
+{
+  AUDIO_IF_Init,
+  AUDIO_IF_DeInit,
+  AUDIO_IF_AudioCmd,
+  AUDIO_IF_VolumeCtl,
+  AUDIO_IF_MuteCtl,
+  AUDIO_IF_PeriodicTC,
+  AUDIO_IF_GetState,
+};
+
+/**
+  * @brief  無音(PWM中央値)をCCRに書き込む
+  */
+static void AUDIO_OutputSilence(void)
+{
+  uint32_t mid = (PWM_CCR_MIN + PWM_CCR_MAX) / 2U;
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, mid);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, mid);
+}
+
+static int8_t AUDIO_IF_Init(uint32_t AudioFreq, uint32_t Volume, uint32_t options)
+{
+  UNUSED(AudioFreq);
+  UNUSED(Volume);
+  UNUSED(options);
+
+  AUDIO_OutputSilence();
+  return 0;
+}
+
+static int8_t AUDIO_IF_DeInit(uint32_t options)
+{
+  UNUSED(options);
+  g_usb_audio_playing = 0U;
+  AUDIO_OutputSilence();
+  return 0;
+}
+
+/**
+  * @brief  AUDIO_CMD_START / PLAY / STOP を処理する
+  *
+  *   START: ホストからの最初の1周分データが揃った合図。
+  *          リングバッファの先頭アドレスを保存し、TIM4割り込みを起動する。
+  *   PLAY : Sync()がAUDIO_OFFSET_FULLで呼ばれた際の再同期チェックポイント。
+  *          このアーキテクチャでは特に処理不要(no-op)。
+  *   STOP : ホストが再生を止めた。TIM4を止め、無音を出力する。
+  */
+static int8_t AUDIO_IF_AudioCmd(uint8_t *pbuf, uint32_t size, uint8_t cmd)
+{
+  UNUSED(size);
+
+  switch (cmd)
+  {
+    case AUDIO_CMD_START:
+      g_audio_ring       = pbuf;   /* &haudio->buffer[0] */
+      g_play_ptr         = 0U;
+      g_bytes_since_sync = 0U;
+      g_sync_half_toggle = 0U;
+      g_debug_write = 0U;
+      g_debug_read = 0U;
+      g_debug_left_sum = 0;
+      g_debug_right_sum = 0;
+      g_debug_sample_count = 0U;
+      g_usb_audio_playing = 1U;
+      HAL_TIM_Base_Start_IT(&htim4);
+      break;
+
+    case AUDIO_CMD_PLAY:
+      /* 再同期チェックポイント。g_play_ptrは常に自走しているのでno-op */
+      break;
+
+    case AUDIO_CMD_STOP:
+      g_usb_audio_playing = 0U;
+      HAL_TIM_Base_Stop_IT(&htim4);
+      AUDIO_OutputSilence();
+      break;
+
+    default:
+      break;
+  }
+
+  return 0;
+}
+
+static int8_t AUDIO_IF_VolumeCtl(uint8_t vol)
+{
+  UNUSED(vol);
+  /* ボリューム制御は未実装(常にホスト側音量そのまま出力) */
+  return 0;
+}
+
+static int8_t AUDIO_IF_MuteCtl(uint8_t cmd)
+{
+  if (cmd != 0U)
+  {
+    AUDIO_OutputSilence();
+  }
+  return 0;
+}
+
+static int8_t AUDIO_IF_PeriodicTC(uint8_t *pbuf, uint32_t size, uint8_t cmd)
+{
+  UNUSED(pbuf);
+  UNUSED(size);
+  UNUSED(cmd);
+  /* 毎USBフレーム(1ms)ごとに呼ばれるが、再生自体はTIM4側で自走しているため
+     ここでは何もしない */
+  return 0;
+}
+
+static int8_t AUDIO_IF_GetState(void)
+{
+  return 0;
+}
+
+uint8_t AUDIO_DebugPop(int16_t *left, int16_t *right)
+{
+  uint8_t read = g_debug_read;
+
+  if (read == g_debug_write)
+  {
+    return 0U;
+  }
+
+  *left = g_debug_left[read];
+  *right = g_debug_right[read];
+  g_debug_read = (uint8_t)((read + 1U) % PCM_DEBUG_QUEUE_SIZE);
+  return 1U;
+}
+
+/* ============================================================================
+ * TIM4 : オーディオサンプルレート(USBD_AUDIO_FREQ Hz)割り込みタイマー
+ *
+ *   72MHz / (ARR+1) = USBD_AUDIO_FREQ
+ * ==========================================================================*/
+void MX_TIM4_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  uint32_t arr = (72000000U / USBD_AUDIO_FREQ) - 1U;
+
+  htim4.Instance               = TIM4;
+  htim4.Init.Prescaler         = 0;
+  htim4.Init.CounterMode       = TIM_COUNTERMODE_UP;
+  htim4.Init.Period            = arr;
+  htim4.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  HAL_NVIC_SetPriority(TIM4_IRQn, 2, 0);
+  HAL_NVIC_EnableIRQ(TIM4_IRQn);
+
+  /* HAL_TIM_Base_Start_IT()自体はAUDIO_CMD_START受信時に呼ぶので
+     ここではペリフェラルの初期化のみ行う */
+}
+
+extern USBD_HandleTypeDef hUsbDeviceFS;
+
+/* TIM4_IRQHandler は stm32f1xx_it.c 側に集約する */
+
+/**
+  * @brief  TIM周期割り込みコールバック (TIM4のみ処理)
+  *
+  *  毎回1サンプル(L16+R16 = 4byte)をリングバッファから取り出し、
+  *  0..65535 の符号なし範囲に変換してPWM CCRへ反映する。
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance != TIM4)
+  {
+    return;
+  }
+
+  if ((g_usb_audio_playing == 0U) || (g_audio_ring == NULL))
+  {
+    return;
+  }
+
+  /* AUDIO_TOTAL_BUF_SIZE = usbd_audio.h で定義されるリング全体のバイト数 */
+  const uint32_t ring_size = AUDIO_TOTAL_BUF_SIZE;
+
+  /* リトルエンディアンで L16, R16 を取り出す */
+  int16_t left  = (int16_t)((uint16_t)g_audio_ring[g_play_ptr] |
+                             ((uint16_t)g_audio_ring[g_play_ptr + 1U] << 8));
+  int16_t right = (int16_t)((uint16_t)g_audio_ring[g_play_ptr + 2U] |
+                             ((uint16_t)g_audio_ring[g_play_ptr + 3U] << 8));
+
+  g_play_ptr += 4U;
+  if (g_play_ptr >= ring_size)
+  {
+    g_play_ptr = 0U;
+  }
+
+  /* signed 16bit (-32768..32767) -> unsigned 0..65535 -> PWM CCR範囲 */
+  uint32_t uleft  = (uint32_t)((int32_t)left  + 32768);
+  uint32_t uright = (uint32_t)((int32_t)right + 32768);
+
+  uint32_t ccrL = PWM_CCR_MIN + (uleft  * (PWM_CCR_MAX - PWM_CCR_MIN)) / 65535U;
+  uint32_t ccrR = PWM_CCR_MIN + (uright * (PWM_CCR_MAX - PWM_CCR_MIN)) / 65535U;
+
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccrL);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccrR);
+
+  /* PCMリングバッファから読んだ8サンプルを平均してデバッグキューへ保存する。 */
+  g_debug_left_sum += left;
+  g_debug_right_sum += right;
+  g_debug_sample_count++;
+  if (g_debug_sample_count == PCM_DEBUG_AVERAGE_SAMPLES)
+  {
+    uint8_t next = (uint8_t)((g_debug_write + 1U) % PCM_DEBUG_QUEUE_SIZE);
+    if (next != g_debug_read)
+    {
+      g_debug_left[g_debug_write] = (int16_t)(g_debug_left_sum / (int32_t)PCM_DEBUG_AVERAGE_SAMPLES);
+      g_debug_right[g_debug_write] = (int16_t)(g_debug_right_sum / (int32_t)PCM_DEBUG_AVERAGE_SAMPLES);
+      g_debug_write = next;
+    }
+    g_debug_left_sum = 0;
+    g_debug_right_sum = 0;
+    g_debug_sample_count = 0U;
+  }
+
+  /* 半周・1周ごとにUSBD_AUDIO_Syncを呼び、ホストとのクロックドリフト
+     補正(usbd_audio.c内蔵の±4byte調整)を機能させる */
+  g_bytes_since_sync += 4U;
+  if (g_bytes_since_sync >= (ring_size / 2U))
+  {
+    g_bytes_since_sync = 0U;
+    g_sync_half_toggle = (uint8_t)(1U - g_sync_half_toggle);
+    USBD_AUDIO_Sync(&hUsbDeviceFS,
+                     (g_sync_half_toggle != 0U) ? AUDIO_OFFSET_FULL : AUDIO_OFFSET_HALF);
+  }
+}

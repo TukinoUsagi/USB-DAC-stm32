@@ -1,0 +1,552 @@
+/**
+  ******************************************************************************
+  * @file    usbd_audio_if.c
+  * @brief   USB Audio再生エンジン本体
+  *
+  * ----------------------------------------------------------------------------
+  * 動作の流れ
+  * ----------------------------------------------------------------------------
+  *   PC (USB Audio Class 1.0, 16bit stereo, USBD_AUDIO_FREQ Hz)
+  *       ↓ (毎USBフレーム=1msごとにISOアウト転送)
+  *   usbd_audio.c (ST公式ミドルウェア)
+  *       ↓ haudio->buffer[] というリングバッファに書き込み
+  *       ↓
+  *   USB側 : haudio->wr_ptr
+  *       ↓
+  *   TIM4 割り込み (USBD_AUDIO_FREQ Hzごとに発火)
+  *       ↓
+  *   TIM4側 : haudio->rd_ptr
+  *       ↓
+  *   PCM 1サンプル(L16+R16=4byte)取り出し
+  *       ↓
+  *   0..65535 にオフセットしてPWM CCR範囲にスケーリング
+  *       ↓
+  *   TIM1 CCR1(LEFT) / CCR2(RIGHT) 書き込み
+  *       ↓
+  *   TIM1 120kHz相補PWM出力 (PA8/PB13, PA9/PB14)
+  *
+  * ----------------------------------------------------------------------------
+  * リングバッファ管理
+  * ----------------------------------------------------------------------------
+  *   USB受信側 : haudio->wr_ptr を進める
+  *   TIM4側    : haudio->rd_ptr を進める
+  *
+  *   rd_ptr と wr_ptr は独立して動作する。
+  *   TIM4側では独自の再生ポインタを持たず、
+  *   ST USB Audioミドルウェア本来の haudio->rd_ptr を使用する。
+  *
+  ******************************************************************************
+  */
+
+#include "usbd_audio_if.h"
+#include "main.h"
+
+
+/* ----------------------------------------------------------------------------
+ * PWM CCR 可動範囲
+ *
+ * TIM1 Period=599
+ * DeadTime=7
+ * ----------------------------------------------------------------------------*/
+#define PWM_CCR_MIN   30U
+#define PWM_CCR_MAX   570U
+
+/* UART送信は割込み内で行わず、8サンプル平均をmain()へ渡す。 */
+#define PCM_DEBUG_AVERAGE_SAMPLES  8U
+#define PCM_DEBUG_QUEUE_SIZE       64U
+
+extern TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim4;
+
+/*
+ * USB Audio再生中フラグ
+ */
+volatile uint8_t g_usb_audio_playing = 0U;
+
+/*
+ * デバッグ用PCMキュー
+ */
+static volatile int16_t g_debug_left[PCM_DEBUG_QUEUE_SIZE];
+static volatile int16_t g_debug_right[PCM_DEBUG_QUEUE_SIZE];
+static volatile uint8_t g_debug_write = 0U;
+static volatile uint8_t g_debug_read = 0U;
+static int32_t g_debug_left_sum = 0;
+static int32_t g_debug_right_sum = 0;
+static uint8_t g_debug_sample_count = 0U;
+
+/*
+ * USBD Audio interface callback
+ */
+static int8_t AUDIO_IF_Init(uint32_t AudioFreq,
+                            uint32_t Volume,
+                            uint32_t options);
+
+static int8_t AUDIO_IF_DeInit(uint32_t options);
+
+static int8_t AUDIO_IF_AudioCmd(uint8_t *pbuf,
+                                uint32_t size,
+                                uint8_t cmd);
+
+static int8_t AUDIO_IF_VolumeCtl(uint8_t vol);
+
+static int8_t AUDIO_IF_MuteCtl(uint8_t cmd);
+
+static int8_t AUDIO_IF_PeriodicTC(uint8_t *pbuf,
+                                  uint32_t size,
+                                  uint8_t cmd);
+
+static int8_t AUDIO_IF_GetState(void);
+
+USBD_AUDIO_ItfTypeDef USBD_AUDIO_fops =
+{
+  AUDIO_IF_Init,
+  AUDIO_IF_DeInit,
+  AUDIO_IF_AudioCmd,
+  AUDIO_IF_VolumeCtl,
+  AUDIO_IF_MuteCtl,
+  AUDIO_IF_PeriodicTC,
+  AUDIO_IF_GetState,
+};
+
+
+/**
+  * @brief  無音(PWM中央値)をCCRに書き込む
+  */
+static void AUDIO_OutputSilence(void)
+{
+  uint32_t mid = (PWM_CCR_MIN + PWM_CCR_MAX) / 2U;
+
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, mid);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, mid);
+}
+
+
+/**
+  * @brief  AUDIO Interface Init
+  */
+static int8_t AUDIO_IF_Init(uint32_t AudioFreq,
+                            uint32_t Volume,
+                            uint32_t options)
+{
+  UNUSED(AudioFreq);
+  UNUSED(Volume);
+  UNUSED(options);
+
+  AUDIO_OutputSilence();
+
+  return 0;
+}
+
+
+/**
+  * @brief  AUDIO Interface DeInit
+  */
+static int8_t AUDIO_IF_DeInit(uint32_t options)
+{
+  UNUSED(options);
+
+  g_usb_audio_playing = 0U;
+
+  HAL_TIM_Base_Stop_IT(&htim4);
+
+  AUDIO_OutputSilence();
+
+  return 0;
+}
+
+
+/**
+  * @brief  AUDIO_CMD_START / PLAY / STOP を処理する
+  *
+  *   START:
+  *       USB側でリングバッファへの初期データ蓄積が完了。
+ *       TIM4を起動する。
+  *
+  *       pbufは保存しない。
+  *       TIM4側はUSBD_AUDIO_HandleTypeDefの
+  *       haudio->buffer[] と haudio->rd_ptr を直接使用する。
+  *
+  *   PLAY:
+  *       再同期チェックポイント。
+  *       rd_ptrはここでは変更しない。
+  *
+  *   STOP:
+  *       TIM4を停止して無音を出力する。
+  */
+static int8_t AUDIO_IF_AudioCmd(uint8_t *pbuf,
+                                uint32_t size,
+                                uint8_t cmd)
+{
+  UNUSED(pbuf);
+  UNUSED(size);
+
+  switch (cmd)
+  {
+    case AUDIO_CMD_START:
+
+      /*
+       * rd_ptrはST USB Audioミドルウェア側の
+       * haudio->rd_ptrをTIM4が直接使用する。
+       *
+       * ここでは独自の再生ポインタを持たない。
+       */
+
+      g_debug_write = 0U;
+      g_debug_read = 0U;
+      g_debug_left_sum = 0;
+      g_debug_right_sum = 0;
+      g_debug_sample_count = 0U;
+
+      g_usb_audio_playing = 1U;
+
+      HAL_TIM_Base_Start_IT(&htim4);
+
+      break;
+
+
+    case AUDIO_CMD_PLAY:
+
+      /*
+       * rd_ptrはTIM4側だけが進める。
+       *
+       * USBD_AUDIO_Sync()から呼ばれても
+       * rd_ptrを変更しない。
+       */
+
+      break;
+
+
+    case AUDIO_CMD_STOP:
+
+      g_usb_audio_playing = 0U;
+
+      HAL_TIM_Base_Stop_IT(&htim4);
+
+      AUDIO_OutputSilence();
+
+      break;
+
+
+    default:
+
+      break;
+  }
+
+  return 0;
+}
+
+
+/**
+  * @brief  Volume control
+  */
+static int8_t AUDIO_IF_VolumeCtl(uint8_t vol)
+{
+  UNUSED(vol);
+
+  /*
+   * ボリューム制御は未実装
+   */
+  return 0;
+}
+
+
+/**
+  * @brief  Mute control
+  */
+static int8_t AUDIO_IF_MuteCtl(uint8_t cmd)
+{
+  if (cmd != 0U)
+  {
+    AUDIO_OutputSilence();
+  }
+
+  return 0;
+}
+
+
+/**
+  * @brief  USB Audio periodic transfer callback
+  *
+  * USB側ではここでPCMデータを受信済み。
+  * 再生はTIM4側で行うため、ここでは何もしない。
+  */
+static int8_t AUDIO_IF_PeriodicTC(uint8_t *pbuf,
+                                  uint32_t size,
+                                  uint8_t cmd)
+{
+  UNUSED(pbuf);
+  UNUSED(size);
+  UNUSED(cmd);
+
+  return 0;
+}
+
+
+/**
+  * @brief  Get state
+  */
+static int8_t AUDIO_IF_GetState(void)
+{
+  return 0;
+}
+
+
+/**
+  * @brief  デバッグキューからPCM平均値を取り出す
+  */
+uint8_t AUDIO_DebugPop(int16_t *left, int16_t *right)
+{
+  uint8_t read = g_debug_read;
+
+  if (read == g_debug_write)
+  {
+    return 0U;
+  }
+
+  *left = g_debug_left[read];
+  *right = g_debug_right[read];
+
+  g_debug_read =
+      (uint8_t)((read + 1U) % PCM_DEBUG_QUEUE_SIZE);
+
+  return 1U;
+}
+
+
+/* ============================================================================
+ * TIM4 : オーディオサンプルレート割り込みタイマー
+ *
+ *   TIM4 = USBD_AUDIO_FREQ Hz
+ *
+ *   例:
+ *     USBD_AUDIO_FREQ = 16000Hz
+ *     TIM4 clock      = 72MHz
+ *     ARR             = 4499
+ *
+ *   72MHz / (4499 + 1) = 16000Hz
+ * ==========================================================================*/
+
+void MX_TIM4_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  uint32_t arr =
+      (72000000U / USBD_AUDIO_FREQ) - 1U;
+
+  htim4.Instance               = TIM4;
+  htim4.Init.Prescaler         = 0;
+  htim4.Init.CounterMode       = TIM_COUNTERMODE_UP;
+  htim4.Init.Period            = arr;
+  htim4.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+
+  if (HAL_TIM_ConfigClockSource(&htim4,
+                                &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
+
+  if (HAL_TIMEx_MasterConfigSynchronization(
+          &htim4,
+          &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  HAL_NVIC_SetPriority(TIM4_IRQn, 2, 0);
+  HAL_NVIC_EnableIRQ(TIM4_IRQn);
+
+  /*
+   * HAL_TIM_Base_Start_IT()は
+   * AUDIO_CMD_START受信時に実行する。
+   */
+}
+
+
+extern USBD_HandleTypeDef hUsbDeviceFS;
+
+
+/**
+  * @brief  TIM周期割り込みコールバック
+  *
+  * 重要:
+  *
+  *   TIM4側では独自のg_play_ptrを使用しない。
+  *
+  *   ST USB Audio middlewareが持っている
+  *
+  *       haudio->rd_ptr
+  *       haudio->buffer[]
+  *
+  *   を直接使用する。
+  *
+  *   1回の割り込みで1 PCM stereo sample = 4byteを消費する。
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  USBD_AUDIO_HandleTypeDef *haudio;
+
+  if (htim->Instance != TIM4)
+  {
+    return;
+  }
+
+  if (g_usb_audio_playing == 0U)
+  {
+    return;
+  }
+
+  /*
+   * ST USB Audio middlewareのハンドルを取得。
+   */
+  if (hUsbDeviceFS.pClassDataCmsit[hUsbDeviceFS.classId] == NULL)
+  {
+    return;
+  }
+
+  haudio =
+      (USBD_AUDIO_HandleTypeDef *)
+      hUsbDeviceFS.pClassDataCmsit[hUsbDeviceFS.classId];
+
+  /*
+   * rd_ptrはTIM4側だけが進める。
+   */
+  uint16_t rd_ptr = haudio->rd_ptr;
+
+  /*
+   * リングバッファ範囲チェック。
+   *
+   * 1 stereo sample = 4byteなので、
+   * 最後の4byteを読み出せる位置だけを使用する。
+   */
+  if (rd_ptr > (AUDIO_TOTAL_BUF_SIZE - 4U))
+  {
+    rd_ptr = 0U;
+    haudio->rd_ptr = 0U;
+  }
+
+  /*
+   * PCM16 stereo
+   *
+   * buffer[rd_ptr + 0] = Left Low
+   * buffer[rd_ptr + 1] = Left High
+   * buffer[rd_ptr + 2] = Right Low
+   * buffer[rd_ptr + 3] = Right High
+   */
+
+  int16_t left =
+      (int16_t)((uint16_t)haudio->buffer[rd_ptr] |
+                ((uint16_t)haudio->buffer[rd_ptr + 1U] << 8));
+
+  int16_t right =
+      (int16_t)((uint16_t)haudio->buffer[rd_ptr + 2U] |
+                ((uint16_t)haudio->buffer[rd_ptr + 3U] << 8));
+
+  /*
+   * 1 stereo sample = 4byte消費
+   */
+  rd_ptr += 4U;
+
+  if (rd_ptr >= AUDIO_TOTAL_BUF_SIZE)
+  {
+    rd_ptr = 0U;
+  }
+
+  /*
+   * 本来のrd_ptrへ書き戻す。
+   *
+   * これ以外の場所ではTIM4の再生位置を変更しない。
+   */
+  haudio->rd_ptr = rd_ptr;
+
+
+  /*
+   * signed 16bit
+   *
+   *   -32768 ～ +32767
+   *
+   * ↓
+   *
+   * unsigned
+   *
+   *   0 ～ 65535
+   *
+   * ↓
+   *
+   * PWM CCR
+   *
+   *   30 ～ 570
+   */
+
+  uint32_t uleft =
+      (uint32_t)((int32_t)left + 32768);
+
+  uint32_t uright =
+      (uint32_t)((int32_t)right + 32768);
+
+  uint32_t ccrL =
+      PWM_CCR_MIN +
+      (uleft * (PWM_CCR_MAX - PWM_CCR_MIN)) / 65535U;
+
+  uint32_t ccrR =
+      PWM_CCR_MIN +
+      (uright * (PWM_CCR_MAX - PWM_CCR_MIN)) / 65535U;
+
+
+  /*
+   * TIM1 PWM duty更新
+   */
+  __HAL_TIM_SET_COMPARE(&htim1,
+                        TIM_CHANNEL_1,
+                        ccrL);
+
+  __HAL_TIM_SET_COMPARE(&htim1,
+                        TIM_CHANNEL_2,
+                        ccrR);
+
+
+  /*
+   * PCMデバッグ用
+   *
+   * 8サンプル平均してmain()側へ渡す。
+   */
+  g_debug_left_sum += left;
+  g_debug_right_sum += right;
+  g_debug_sample_count++;
+
+  if (g_debug_sample_count == PCM_DEBUG_AVERAGE_SAMPLES)
+  {
+    uint8_t next =
+        (uint8_t)((g_debug_write + 1U) %
+                  PCM_DEBUG_QUEUE_SIZE);
+
+    if (next != g_debug_read)
+    {
+      g_debug_left[g_debug_write] =
+          (int16_t)(g_debug_left_sum /
+                    (int32_t)PCM_DEBUG_AVERAGE_SAMPLES);
+
+      g_debug_right[g_debug_write] =
+          (int16_t)(g_debug_right_sum /
+                    (int32_t)PCM_DEBUG_AVERAGE_SAMPLES);
+
+      g_debug_write = next;
+    }
+
+    g_debug_left_sum = 0;
+    g_debug_right_sum = 0;
+    g_debug_sample_count = 0U;
+  }
+}
+
