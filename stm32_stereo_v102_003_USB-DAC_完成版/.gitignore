@@ -1,0 +1,11 @@
+build/
+*.o
+*.d
+*.lst
+*.map
+*.elf
+*.bin
+*.hex
+*.wav
+*.desktop
+*.zip
