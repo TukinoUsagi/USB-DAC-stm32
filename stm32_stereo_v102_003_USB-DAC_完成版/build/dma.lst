@@ -1,0 +1,118 @@
+ARM GAS  /tmp/ccD80uty.s 			page 1
+
+
+   1              		.cpu cortex-m3
+   2              		.arch armv7-m
+   3              		.fpu softvfp
+   4              		.eabi_attribute 20, 1
+   5              		.eabi_attribute 21, 1
+   6              		.eabi_attribute 23, 3
+   7              		.eabi_attribute 24, 1
+   8              		.eabi_attribute 25, 1
+   9              		.eabi_attribute 26, 1
+  10              		.eabi_attribute 30, 1
+  11              		.eabi_attribute 34, 1
+  12              		.eabi_attribute 18, 4
+  13              		.file	"dma.c"
+  14              		.text
+  15              	.Ltext0:
+  16              		.cfi_sections	.debug_frame
+  17              		.file 1 "Core/Src/dma.c"
+  18              		.section	.text.MX_DMA_Init,"ax",%progbits
+  19              		.align	1
+  20              		.global	MX_DMA_Init
+  21              		.syntax unified
+  22              		.thumb
+  23              		.thumb_func
+  25              	MX_DMA_Init:
+  26              	.LFB65:
+   1:Core/Src/dma.c **** #include "dma.h"
+   2:Core/Src/dma.c **** 
+   3:Core/Src/dma.c **** /**
+   4:Core/Src/dma.c ****   * @brief DMA Initialization Function
+   5:Core/Src/dma.c ****   *        DMA1_Channel1 = ADC1用 (実体のDMA_HandleTypeDefとリンクは
+   6:Core/Src/dma.c ****   *        adc.c の HAL_ADC_MspInit() で行う。CubeMX標準の分割方式)
+   7:Core/Src/dma.c ****   * @retval None
+   8:Core/Src/dma.c ****   */
+   9:Core/Src/dma.c **** void MX_DMA_Init(void)
+  10:Core/Src/dma.c **** {
+  27              		.loc 1 10 1 view -0
+  28              		.cfi_startproc
+  29              		@ args = 0, pretend = 0, frame = 8
+  30              		@ frame_needed = 0, uses_anonymous_args = 0
+  31 0000 00B5     		push	{lr}
+  32              	.LCFI0:
+  33              		.cfi_def_cfa_offset 4
+  34              		.cfi_offset 14, -4
+  35 0002 83B0     		sub	sp, sp, #12
+  36              	.LCFI1:
+  37              		.cfi_def_cfa_offset 16
+  11:Core/Src/dma.c ****   /* DMA controller clock enable */
+  12:Core/Src/dma.c ****   __HAL_RCC_DMA1_CLK_ENABLE();
+  38              		.loc 1 12 3 view .LVU1
+  39              	.LBB2:
+  40              		.loc 1 12 3 view .LVU2
+  41              		.loc 1 12 3 view .LVU3
+  42 0004 0A4B     		ldr	r3, .L3
+  43 0006 5A69     		ldr	r2, [r3, #20]
+  44 0008 42F00102 		orr	r2, r2, #1
+  45 000c 5A61     		str	r2, [r3, #20]
+  46              		.loc 1 12 3 view .LVU4
+ARM GAS  /tmp/ccD80uty.s 			page 2
+
+
+  47 000e 5B69     		ldr	r3, [r3, #20]
+  48 0010 03F00103 		and	r3, r3, #1
+  49 0014 0193     		str	r3, [sp, #4]
+  50              		.loc 1 12 3 view .LVU5
+  51 0016 019B     		ldr	r3, [sp, #4]
+  52              	.LBE2:
+  53              		.loc 1 12 3 view .LVU6
+  13:Core/Src/dma.c **** 
+  14:Core/Src/dma.c ****   /* DMA interrupt init */
+  15:Core/Src/dma.c ****   /* DMA1_Channel1_IRQn interrupt configuration (ADC1) */
+  16:Core/Src/dma.c ****   /* USB(優先度3)と同等にして、120kHz ADC DMA割り込みがUSB Audioの
+  17:Core/Src/dma.c ****      OUT転送を継続的にプリエンプトしないようにする。TIM4(優先度2)は
+  18:Core/Src/dma.c ****      PCM→PWM更新を優先して実行する。 */
+  19:Core/Src/dma.c ****   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 3, 0);
+  54              		.loc 1 19 3 view .LVU7
+  55 0018 0022     		movs	r2, #0
+  56 001a 0321     		movs	r1, #3
+  57 001c 0B20     		movs	r0, #11
+  58 001e FFF7FEFF 		bl	HAL_NVIC_SetPriority
+  59              	.LVL0:
+  20:Core/Src/dma.c ****   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  60              		.loc 1 20 3 view .LVU8
+  61 0022 0B20     		movs	r0, #11
+  62 0024 FFF7FEFF 		bl	HAL_NVIC_EnableIRQ
+  63              	.LVL1:
+  21:Core/Src/dma.c **** }
+  64              		.loc 1 21 1 is_stmt 0 view .LVU9
+  65 0028 03B0     		add	sp, sp, #12
+  66              	.LCFI2:
+  67              		.cfi_def_cfa_offset 4
+  68              		@ sp needed
+  69 002a 5DF804FB 		ldr	pc, [sp], #4
+  70              	.L4:
+  71 002e 00BF     		.align	2
+  72              	.L3:
+  73 0030 00100240 		.word	1073876992
+  74              		.cfi_endproc
+  75              	.LFE65:
+  77              		.text
+  78              	.Letext0:
+  79              		.file 2 "Drivers/CMSIS/Device/ST/STM32F1xx/Include/stm32f103xb.h"
+  80              		.file 3 "/usr/lib/gcc/arm-none-eabi/13.2.1/include/stdint.h"
+  81              		.file 4 "Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_cortex.h"
+ARM GAS  /tmp/ccD80uty.s 			page 3
+
+
+DEFINED SYMBOLS
+                            *ABS*:00000000 dma.c
+     /tmp/ccD80uty.s:19     .text.MX_DMA_Init:00000000 $t
+     /tmp/ccD80uty.s:25     .text.MX_DMA_Init:00000000 MX_DMA_Init
+     /tmp/ccD80uty.s:73     .text.MX_DMA_Init:00000030 $d
+
+UNDEFINED SYMBOLS
+HAL_NVIC_SetPriority
+HAL_NVIC_EnableIRQ

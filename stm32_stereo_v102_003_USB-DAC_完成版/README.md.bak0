@@ -1,0 +1,112 @@
+# STM32 USB DAC v200
+
+STM32F103C8T6（Blue Pill）を、16 kHz / 16 bit / ステレオのUSB Audio Class 1.0デバイスとして動作させ、受信したPCMを120 kHzの相補PWMへ反映するプロジェクトです。
+
+## 機能
+
+- USB Audio Class 1.0: PCM `S16_LE`、16 kHz、ステレオ、USB Full Speed
+- TIM1: 120 kHz PWM、左右独立、相補出力、デッドタイム7
+- USB再生中: PCMをTIM4の16 kHz割込みで読み出し、TIM1のCCR1/CCR2へ反映
+- USB非再生時: ADC1入力をPWMへ反映
+- PCMデバッグ: リングバッファから読んだPCMを8サンプルごとに平均し、USART2から出力
+
+## ピン配置
+
+| 機能 | ピン | 内容 |
+|---|---|---|
+| PWM 左 | PA8 | TIM1_CH1 |
+| PWM 左（相補） | PB13 | TIM1_CH1N |
+| PWM 右 | PA9 | TIM1_CH2 |
+| PWM 右（相補） | PB14 | TIM1_CH2N |
+| ADC 左 | PB0 | ADC1_CH8 |
+| ADC 右 | PB1 | ADC1_CH9 |
+| UART2 TX | PA2 | PCMデバッグ出力 |
+| UART2 RX | PA3 | 受信（デバッグには未使用） |
+| USB DM / DP | PA11 / PA12 | USB Full Speed |
+
+## 信号処理の流れ
+
+```text
+PC (16 kHz, S16_LE, stereo)
+  -> USB OUT endpoint 0x01
+  -> USB Audioリングバッファ
+  -> TIM4（16 kHz）
+  -> L/R PCMをPWMのCCR範囲へ変換
+  -> TIM1 CCR1 / CCR2
+  -> PA8 / PA9（120 kHz PWM）
+```
+
+TIM1の周期は599です（72 MHz / 600 = 120 kHz）。PCM値 `-32768..32767` は、デッドタイムの余裕を含めてCCR `30..570` に線形変換されます。
+
+USB Audio OUTエンドポイントは、フィードバック端点を使わないAdaptive data sinkとして記述しています。入力端子とストリーム形式はどちらもStereo（Front Left / Front Right）です。
+
+## ビルド
+
+ARM GNU Toolchainが利用できる環境で実行します。
+
+```bash
+make -j2
+```
+
+生成物は以下です。
+
+- `build/STM32_v102_001.bin` — 書込み用バイナリ
+- `build/STM32_v102_001.hex` — Intel HEX
+- `build/STM32_v102_001.elf` — デバッグ用ELF
+
+## LinuxでのUSB音声テスト
+
+書込み後はUSBを一度抜き差しし、Linuxに更新したUSB記述子を読み込ませてください。
+
+```bash
+aplay -vv -D hw:1,0 ./test_1kHz_16k_stereo.wav
+```
+
+連続再生する場合は次を使用します。
+
+```bash
+while true; do
+  aplay -q -D hw:1,0 ./test_1kHz_16k_stereo.wav
+done
+```
+
+認識・再生形式の確認:
+
+```bash
+cat /proc/asound/card1/stream0
+```
+
+`Altset 1`、`S16_LE`、`Channels: 2`、`Rates: 16000` が表示され、`aplay` が `set_params` エラーなく再生できれば、PCからPCMが送信されています。
+
+## USART2 PCMデバッグ
+
+USB再生中は、リングバッファから実際に読んだ左右PCMを8サンプル平均して出力します。
+
+```text
+PCM8 L=12345 R=12345
+PCM8 L=-12345 R=-12345
+```
+
+USART2の設定は **921600 bps / 8 data bits / no parity / 1 stop bit (8N1)** です。USB-UART変換器は次のように配線します。
+
+```text
+Blue Pill PA2 (TX) -> USB-UART RX
+Blue Pill GND      -> USB-UART GND
+```
+
+例（デバイス名は環境に合わせて変更）:
+
+```bash
+minicom -D /dev/ttyUSB0 -b 921600
+```
+
+`PCM8` の左右値が変化する場合、USB受信、リングバッファへの格納、TIM4による読み出しが動作しています。値が常に0付近なら、PC側の再生データまたはUSB受信経路を確認してください。
+
+## オシロスコープ確認
+
+1 kHzテスト音では、PA8/PA9の120 kHzキャリアのDutyが1 kHz周期で変化します。
+
+- PWM周波数確認: 2 µs/div前後
+- Duty変化確認: 1 kHzトリガ、200 µs/div前後、Persistence有効
+
+USB再生中はADC側のCCR更新を停止し、USB PCM側のみがPWM Dutyを制御します。
